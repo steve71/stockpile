@@ -1,0 +1,30 @@
+services:
+  options-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stockpile-options-scanner:latest
+    container_name: options-scanner
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount your configuration (ensure you've created config.toml from the example first)
+      - ./options-scanner/config.toml:/app/options-scanner/config.toml
+      
+      # Mount your brokerage CSV folder as read-only for the Portfolio tab
+      - ./input:/app/input:ro
+      
+      # Mount the output folder to access generated HTML reports on the host
+      - ./options-scanner/output:/app/options-scanner/output
+
+      # Optional: Uncomment if you use Schwab and want to persist the OAuth token
+      # - ~/.config/schwab-token.json:/root/.config/schwab-token.json
+
+    restart: unless-stopped
+
+    # Streamlit healthcheck using internal Python libraries (avoids needing curl in the image)
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8501/_stcore/health\")'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
