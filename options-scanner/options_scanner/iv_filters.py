@@ -52,6 +52,20 @@ def _min_oi(df: pd.DataFrame, min_oi: int = 1) -> pd.DataFrame:
     return df[df["open_interest"] >= min_oi]
 
 
+def _exclude_earnings(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop options whose expiration spans an earnings event.
+
+    Earnings-spanning contracts carry a legitimate IV premium (the
+    market pricing the jump), so leaving them in the regression pulls
+    the fitted surface upward. Excluding them lets the surface reflect
+    the non-event baseline; the excluded rows still receive iv_fitted
+    and iv_excess from that cleaner fit.
+    """
+    if "earnings_count" not in df.columns:
+        return df
+    return df[df["earnings_count"].fillna(0) <= 0]
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 REGISTRY: dict[str, dict] = {
@@ -74,6 +88,11 @@ REGISTRY: dict[str, dict] = {
         "fn":       _min_oi,
         "defaults": {"min_oi": 1},
         "label":    "Min OI for fit",
+    },
+    "exclude_earnings": {
+        "fn":       _exclude_earnings,
+        "defaults": {},
+        "label":    "Exclude earnings-spanning options",
     },
 }
 

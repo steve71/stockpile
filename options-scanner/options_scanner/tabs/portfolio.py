@@ -226,7 +226,8 @@ def tab_portfolio() -> None:
                               text=f"Scanning {ticker} ({i+1}/{len(positions)})…")
 
             df, earnings_dates, err = fetch_position(
-                ticker, int(port_min_dte), _provider, _scfg
+                ticker, int(port_min_dte), _provider, _scfg,
+                moomoo_config=st.session_state.get("moomoo_config"),
             )
 
             roll_close_costs = {}

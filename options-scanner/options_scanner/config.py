@@ -15,7 +15,7 @@ def load_config() -> dict:
 
 
 def get_provider(cfg: dict) -> str:
-    """Return 'yahoo' or 'schwab' from config, defaulting to 'yahoo'."""
+    """Return 'yahoo', 'schwab', or 'moomoo' from config, defaulting to 'yahoo'."""
     return cfg.get("data_source", {}).get("provider", "yahoo")
 
 
@@ -27,4 +27,18 @@ def get_schwab_config(cfg: dict) -> dict:
         "app_secret":   s.get("app_secret", ""),
         "callback_url": s.get("callback_url", "https://127.0.0.1:8182/"),
         "token_file":   s.get("token_file", "~/.config/schwab-token.json"),
+    }
+
+
+def get_moomoo_config(cfg: dict) -> dict:
+    """Return the [moomoo] section with defaults filled in.
+
+    Keys:
+        host: IP address of the OpenD gateway (default '127.0.0.1').
+        port: TCP port of the OpenD gateway (default 11111).
+    """
+    m = cfg.get("moomoo", {})
+    return {
+        "host": m.get("host", "127.0.0.1"),
+        "port": int(m.get("port", 11111)),
     }

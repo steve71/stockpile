@@ -30,7 +30,21 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _opt_float(row, key):
+    """float(row[key]) or None for missing/NaN — for nullable JSON fields."""
+    if key not in row:
+        return None
+    try:
+        f = float(row[key])
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # NaN → None
+
+
 def _to_candidate(row, roll_close_cost: float | None) -> dict:
+    ss = _opt_float(row, "signal_score")
+    hv = _opt_float(row, "hv_20")
+    vr = _opt_float(row, "vr_ratio")
     c = {
         "type": str(row["type"]),
         "strike": float(row["strike"]),
@@ -41,10 +55,14 @@ def _to_candidate(row, roll_close_cost: float | None) -> dict:
         "mid": round(float(row["mid"]), 2),
         "iv_pct": round(float(row["iv"]) * 100, 1),
         "iv_pp": round(float(row["iv_excess"]) * 100, 1),
+        "signal_score": round(ss, 4) if ss is not None else None,
+        "signal_kind": str(row["signal_kind"]) if "signal_kind" in row else "IV+pp",
         "delta": round(float(row["delta"]), 3),
         "ann_pct": round(float(row["ann_yield_pct"]), 1),
         "open_interest": int(row["open_interest"]),
         "earnings_before_exp": bool(row["earnings_count"] > 0),
+        "hv_20": round(hv, 4) if hv is not None else None,
+        "vr_ratio": round(vr, 3) if vr is not None else None,
     }
     if roll_close_cost is not None:
         c["net_credit"] = round(float(row["mid"]) - roll_close_cost, 2)
@@ -61,6 +79,7 @@ def _build_json_result(
     roll_close_cost: float | None,
 ) -> dict:
     iv_asc = args.buy
+    sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
     types_to_show = ["call", "put"] if mode == "both" else [mode]
     df_filt = df[
         (df["open_interest"] >= args.min_oi) & (df["volume"] >= args.min_vol)
@@ -69,7 +88,7 @@ def _build_json_result(
     for opt_type in types_to_show:
         sub = (
             df_filt[df_filt["type"] == opt_type]
-            .sort_values(["iv_excess", "open_interest"], ascending=[iv_asc, False])
+            .sort_values([sort_col, "open_interest"], ascending=[iv_asc, False])
             .head(args.top)
         )
         for _, row in sub.iterrows():
@@ -91,9 +110,14 @@ def _scan_one(ticker: str, args, opt_type_fetch: str, mode: str,
     Returns (df, spot, earnings_dates, roll_close_cost) on success,
     or None if the ticker cannot be scanned.
     """
+    import numpy as np
+
     from options_scanner.chain import fetch_chain
     from options_scanner.iv_surface import compute_iv_excess
+    from options_scanner.iv_scores import ScoreContext
     from options_scanner.earnings import fetch_earnings_dates, annotate_earnings
+    from options_scanner import iv_history
+    from stocks_shared.yahoo import realized_vol
 
     log.info(
         "Fetching %s chain for %s (DTE %s–%s) via %s...",
@@ -118,15 +142,29 @@ def _scan_one(ticker: str, args, opt_type_fetch: str, mode: str,
         )
         return None
 
+    log.info("Fetching earnings dates...")
+    earnings_dates = fetch_earnings_dates(ticker)
+    # Annotate earnings BEFORE the fit so the exclude_earnings filter
+    # (if selected) can see earnings_count.
+    df = annotate_earnings(df, earnings_dates)
+
     log.info(
         "Found %d options across %d expirations. Fitting IV surface...",
         len(df), df["expiration"].nunique(),
     )
-    df = compute_iv_excess(df)
-
-    log.info("Fetching earnings dates...")
-    earnings_dates = fetch_earnings_dates(ticker)
-    df = annotate_earnings(df, earnings_dates)
+    hv = realized_vol(ticker)
+    ctx = ScoreContext(ticker=ticker, hv_20=hv, history=iv_history)
+    df = compute_iv_excess(
+        df,
+        surface_filters=getattr(args, "surface_filters", None),
+        algo_config=getattr(args, "algo_config", None),
+        score_config=getattr(args, "score_config", None),
+        ctx=ctx,
+    )
+    df["hv_20"] = hv
+    df["vr_ratio"] = (df["iv"] / hv) if (np.isfinite(hv) and hv > 0) \
+        else float("nan")
+    iv_history.record_scan(ticker, df)
 
     spot = float(df["spot"].iloc[0])
 
@@ -289,11 +327,52 @@ def main() -> None:
         help="Suppress the 'how to read this table' legend",
     )
 
+    from options_scanner import iv_algorithms, iv_scores
+    from options_scanner.iv_filters import DEFAULT_CONFIG as _FILTER_DEFAULT
+    _algo_choices = [n for n, e in iv_algorithms.REGISTRY.items()
+                     if e.get("enabled", True)]
+    _score_choices = [n for n, e in iv_scores.REGISTRY.items()
+                      if e.get("enabled", True)]
+    parser.add_argument(
+        "--preset", choices=["current", "v2"], default="current",
+        help="Surface-fit preset: 'current' (global poly + raw IV+pp) or "
+             "'v2' (per-expiration spread-weighted, earnings excluded, "
+             "z-score). Default: current",
+    )
+    parser.add_argument(
+        "--algorithm", choices=_algo_choices, default=None,
+        help="Override the preset's surface-fit algorithm",
+    )
+    parser.add_argument(
+        "--fit-weights", choices=["none", "oi", "inv_spread"], default=None,
+        help="Regression weighting for the fit (with --algorithm)",
+    )
+    parser.add_argument(
+        "--score", choices=_score_choices, default=None,
+        help="Override the preset's ranking score",
+    )
+
     args = parser.parse_args()
 
     if args.agent:
         args.as_json = True
         args.quiet = True
+
+    # Resolve the pluggable surface-fit configs from preset + overrides.
+    _presets = {
+        "current": (_FILTER_DEFAULT, ("global_poly", frozenset()),
+                    ("raw_pp", frozenset())),
+        "v2": (_FILTER_DEFAULT + (("exclude_earnings", frozenset()),),
+               ("per_expiration", frozenset({("weights", "inv_spread")})),
+               ("zscore", frozenset())),
+    }
+    args.surface_filters, args.algo_config, args.score_config = _presets[args.preset]
+    if args.algorithm:
+        _w = frozenset({("weights", args.fit_weights)}) if args.fit_weights \
+            else frozenset()
+        args.algo_config = (args.algorithm, _w)
+    if args.score:
+        args.score_config = (args.score, frozenset())
 
     if args.quiet:
         logging.getLogger().setLevel(logging.WARNING)

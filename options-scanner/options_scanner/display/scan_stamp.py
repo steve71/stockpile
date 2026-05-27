@@ -19,8 +19,12 @@ from __future__ import annotations
 import streamlit as st
 
 
-PROVIDER_LABELS = {"yahoo": "Yahoo Finance", "schwab": "Schwab"}
-PROVIDER_COLORS = {"yahoo": "#16a34a", "schwab": "#2563eb"}   # green / blue
+PROVIDER_LABELS = {"yahoo": "Yahoo Finance", "schwab": "Schwab", "moomoo": "Moomoo"}
+PROVIDER_COLORS = {
+    "yahoo":  "#16a34a",   # green
+    "schwab": "#2563eb",   # blue
+    "moomoo": "#f97316",   # orange
+}
 
 
 def tz_abbr(ts) -> str:
@@ -39,18 +43,22 @@ def tz_abbr(ts) -> str:
 
 
 def scan_stamp_text() -> str:
-    """Format like 'Schwab · 2026-05-16 14:32 EDT'. Empty if no scan yet.
+    """Format like 'Schwab · 2026-05-16 14:32 EDT · Per-expiry'.
 
-    Reads `scan_provider` (snapshotted at scan time) — NOT the live data
-    source dropdown — so the stamp reflects what was actually used to
-    fetch the displayed data, even after the user changes the dropdown.
+    Reads `scan_provider` and `scan_surface_label` (both snapshotted at
+    scan time) so the stamp reflects what was actually used to fetch and
+    fit the displayed data, even after the user changes the dropdowns.
     """
     ts = st.session_state.get("scan_ts")
     if not ts:
         return ""
     provider = st.session_state.get("scan_provider", "yahoo")
     label = PROVIDER_LABELS.get(provider, provider)
-    return f"{label} · {ts.strftime('%Y-%m-%d %H:%M')} {tz_abbr(ts)}".rstrip()
+    stamp = f"{label} · {ts.strftime('%Y-%m-%d %H:%M')} {tz_abbr(ts)}".rstrip()
+    surface = st.session_state.get("scan_surface_label", "")
+    if surface:
+        stamp += f" · {surface}"
+    return stamp
 
 
 def scan_stamp_color() -> str:

@@ -11,6 +11,11 @@ These tests verify:
   - that real outliers are surfaced as iv_excess with the correct sign
   - the iv_excess = iv − iv_fitted identity holds for every row
   - that rows with iv ≤ 0.02 are excluded from the fit but still get columns
+
+These exercise the fit math in isolation, so they pass
+`surface_filters=()` (no filter pipeline) — the synthetic chains omit
+the type/spot/delta columns the default filters need. Filter behavior
+is covered separately in test_iv_filters.py.
 """
 
 import math
@@ -46,14 +51,15 @@ def make_chain(spot: float, dtes: list[int], strikes: list[float],
 
 def test_adds_iv_fitted_and_iv_excess_columns():
     df = make_chain(100, [30, 60], [90, 95, 100, 105, 110], lambda K, t: 0.30)
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert "iv_fitted" in out.columns
     assert "iv_excess" in out.columns
+    assert "fit_method" in out.columns
 
 
 def test_preserves_row_count_and_order():
     df = make_chain(100, [30, 60], [90, 95, 100, 105, 110], lambda K, t: 0.30)
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert len(out) == len(df)
     # Original columns intact, in original order
     for col in df.columns:
@@ -67,7 +73,7 @@ def test_preserves_row_count_and_order():
 def test_does_not_mutate_input():
     df = make_chain(100, [30, 60], [90, 95, 100, 105, 110], lambda K, t: 0.30)
     before_cols = list(df.columns)
-    compute_iv_excess(df)
+    compute_iv_excess(df, surface_filters=())
     assert list(df.columns) == before_cols
     assert "iv_fitted" not in df.columns
     assert "iv_excess" not in df.columns
@@ -80,7 +86,7 @@ def test_iv_excess_equals_iv_minus_iv_fitted_identity():
         [80, 85, 90, 95, 100, 105, 110, 115, 120],
         lambda K, t: 0.20 + 0.001 * (K - 100) ** 2 / 100,
     )
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     diff = (out["iv"] - out["iv_fitted"]) - out["iv_excess"]
     assert diff.abs().max() < 1e-10
 
@@ -90,14 +96,14 @@ def test_iv_excess_equals_iv_minus_iv_fitted_identity():
 def test_small_chain_falls_back_to_zero_excess():
     """Under 5 valid points → no fit, iv_fitted = iv, iv_excess = 0."""
     df = make_chain(100, [30], [95, 100, 105], lambda K, t: 0.30)
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert (out["iv_excess"] == 0.0).all()
     assert (out["iv_fitted"] == out["iv"]).all()
 
 
 def test_empty_chain_returns_empty_frame_with_columns():
     df = pd.DataFrame(columns=["strike", "dte", "iv", "log_moneyness"])
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert len(out) == 0
     assert "iv_fitted" in out.columns
     assert "iv_excess" in out.columns
@@ -106,14 +112,14 @@ def test_empty_chain_returns_empty_frame_with_columns():
 def test_all_zero_iv_chain_falls_back():
     """All IVs filtered out → too few valid points → fallback."""
     df = make_chain(100, [30, 60], [90, 95, 100, 105, 110], lambda K, t: 0.0)
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert (out["iv_excess"] == 0.0).all()
 
 
 def test_all_zero_dte_chain_falls_back():
     df = make_chain(100, [0], [90, 95, 100, 105, 110, 115, 120],
                     lambda K, t: 0.30)
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert (out["iv_excess"] == 0.0).all()
 
 
@@ -126,7 +132,7 @@ def test_flat_surface_yields_near_zero_excess():
         [80, 85, 90, 95, 100, 105, 110, 115, 120],
         lambda K, t: 0.30,
     )
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert out["iv_excess"].abs().max() < 1e-6
     assert (out["iv_fitted"] - 0.30).abs().max() < 1e-6
 
@@ -139,7 +145,7 @@ def test_linear_in_moneyness_surface_is_recovered_exactly():
         [80, 85, 90, 95, 100, 105, 110, 115, 120],
         lambda K, t: 0.25 + 0.10 * math.log(K / spot),
     )
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     # Model includes a·1 + b·m + … so a pure linear-in-m surface fits exactly.
     assert out["iv_excess"].abs().max() < 1e-8
 
@@ -152,7 +158,7 @@ def test_smile_in_moneyness_surface_is_recovered_exactly():
         [80, 85, 90, 95, 100, 105, 110, 115, 120],
         lambda K, t: 0.25 + 0.30 * math.log(K / spot) ** 2,
     )
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert out["iv_excess"].abs().max() < 1e-8
 
 
@@ -168,7 +174,7 @@ def test_single_rich_outlier_above_surface_is_flagged_positive():
         [80, 85, 90, 95, 100, 105, 110, 115, 120],
         lambda K, t: 0.30 + (0.10 if (K == rich_K and t == 30) else 0.0),
     )
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     rich_row = out[(out["strike"] == rich_K) & (out["dte"] == 30)].iloc[0]
     others = out[~((out["strike"] == rich_K) & (out["dte"] == 30))]
     assert rich_row["iv_excess"] > 0.03  # clearly positive
@@ -184,7 +190,7 @@ def test_single_cheap_outlier_below_surface_is_flagged_negative():
         [80, 85, 90, 95, 100, 105, 110, 115, 120],
         lambda K, t: 0.30 - (0.10 if (K == cheap_K and t == 30) else 0.0),
     )
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     cheap_row = out[(out["strike"] == cheap_K) & (out["dte"] == 30)].iloc[0]
     others = out[~((out["strike"] == cheap_K) & (out["dte"] == 30))]
     assert cheap_row["iv_excess"] < -0.03
@@ -201,7 +207,7 @@ def test_outlier_ranking_orders_by_magnitude():
                      + (0.10 if (K == 110 and t == 30) else 0.0)
                      + (0.05 if (K == 90  and t == 30) else 0.0),
     )
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     big   = out[(out["strike"] == 110) & (out["dte"] == 30)]["iv_excess"].iloc[0]
     small = out[(out["strike"] ==  90) & (out["dte"] == 30)]["iv_excess"].iloc[0]
     assert big > small > 0
@@ -220,7 +226,7 @@ def test_rows_with_low_iv_excluded_from_fit_but_still_get_columns():
     )
     # Stomp on one row with sub-threshold IV
     df.loc[0, "iv"] = 0.01
-    out = compute_iv_excess(df)
+    out = compute_iv_excess(df, surface_filters=())
     assert "iv_fitted" in out.columns
     assert "iv_excess" in out.columns
     # Identity still holds even on the excluded row

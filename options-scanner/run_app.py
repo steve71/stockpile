@@ -57,10 +57,15 @@ def _apply_theme(theme_name: str) -> None:  # noqa: ARG001 — preserved for com
 
 # Config must load first so data_source_choice is seeded into session_state
 # before we compute the accent colors below.
-from options_scanner.config import load_config, get_provider, get_schwab_config as _get_schwab_cfg
+from options_scanner.config import (
+    load_config, get_provider,
+    get_schwab_config as _get_schwab_cfg,
+    get_moomoo_config as _get_moomoo_cfg,
+)
 _app_cfg = load_config()
 _cfg_provider = get_provider(_app_cfg)
 _cfg_schwab = _get_schwab_cfg(_app_cfg)
+_cfg_moomoo = _get_moomoo_cfg(_app_cfg)
 _schwab_configured = (
     bool(_cfg_schwab.get("app_key"))
     and not _cfg_schwab["app_key"].startswith("your-")
@@ -68,9 +73,12 @@ _schwab_configured = (
     and not _cfg_schwab["app_secret"].startswith("your-")
 )
 if "data_source_choice" not in st.session_state:
-    st.session_state["data_source_choice"] = (
-        "schwab" if (_cfg_provider == "schwab" and _schwab_configured) else "yahoo"
-    )
+    if _cfg_provider == "schwab" and _schwab_configured:
+        st.session_state["data_source_choice"] = "schwab"
+    elif _cfg_provider == "moomoo":
+        st.session_state["data_source_choice"] = "moomoo"
+    else:
+        st.session_state["data_source_choice"] = "yahoo"
 
 # Compute accent colors from the current data-source choice. Reads
 # `data_source_choice` (the widget key) — NOT the effective
@@ -79,6 +87,7 @@ if "data_source_choice" not in st.session_state:
 _BTN_COLORS = {
     "yahoo":  ("#16a34a", "#15803d"),   # normal, hover
     "schwab": ("#2563eb", "#1d4ed8"),
+    "moomoo": ("#f97316", "#ea6e0e"),
 }
 _btn_bg, _btn_hover = _BTN_COLORS.get(
     st.session_state.get("data_source_choice", "yahoo"),
@@ -120,19 +129,6 @@ button[data-testid="stBaseButton-primary"]:hover {{
     color: {_btn_bg} !important;
 }}
 </style>""", unsafe_allow_html=True)
-
-# Brand wordmark pinned to the top header bar — needs st.markdown so
-# position:fixed in styles.css applies to the main document viewport.
-st.markdown(
-    """
-    <div class='osc-wordmark-overlay' aria-hidden='true'>
-      <span class='osc-wm-dot'></span>
-      <span class='osc-wm-brand'>STOCKPILE</span>
-      <span class='osc-wm-suffix'>· OPTIONS SCANNER</span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
 # Sidebar-state observer: watches the actual sidebar element's rendered
 # width and writes data-sidebar-open onto body so the header-bar CSS
@@ -190,12 +186,14 @@ _components.html(
 def _source_label(s: str) -> str:
     if s == "yahoo":
         return "Yahoo Finance"
+    if s == "moomoo":
+        return "Moomoo (live)"
     return "Schwab (live)" if _schwab_configured else "Schwab (unconfigured)"
 
 with st.container(key="data_source_pill"):
     _source_raw = st.segmented_control(
         "Data source",
-        ["yahoo", "schwab"],
+        ["yahoo", "schwab", "moomoo"],
         format_func=_source_label,
         label_visibility="collapsed",
         key="data_source_choice",
@@ -205,10 +203,13 @@ if _source_raw is None:
 
 if _source_raw == "schwab" and _schwab_configured:
     data_source = "schwab"
+elif _source_raw == "moomoo":
+    data_source = "moomoo"
 else:
     data_source = "yahoo"
 st.session_state["data_source"] = data_source
 st.session_state["schwab_config"] = _cfg_schwab if data_source == "schwab" else None
+st.session_state["moomoo_config"] = _cfg_moomoo if data_source == "moomoo" else None
 
 
 # ── Page header chips ────────────────────────────────────────────────────
@@ -248,8 +249,9 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.caption(
-        "Switch between Yahoo Finance (free, 15-min delay) and Schwab "
-        "(authenticated, live). Use the toggle in the top bar."
+        "Switch between Yahoo Finance (free, 15-min delay), Schwab "
+        "(authenticated, live), and Moomoo (live via OpenD). "
+        "Use the toggle in the top bar."
     )
     st.markdown("---")
     section_header("About", eyebrow="HOW THIS WORKS")
@@ -276,6 +278,20 @@ with st.sidebar:
 # any deferred code path references it. With the new design system in
 # place this is a no-op.
 _apply_theme("Default")
+
+# Brand wordmark — now in normal document flow just below the fixed
+# title bar (rescan / data-source / surface-fit pills), so it scrolls
+# away with the page instead of staying pinned.
+st.markdown(
+    """
+    <div class='osc-wordmark-inline'>
+      <span class='osc-wm-dot'></span>
+      <span class='osc-wm-brand'>STOCKPILE</span>
+      <span class='osc-wm-suffix'>· OPTIONS SCANNER</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 (
     panel_single, panel_gex, panel_portfolio,

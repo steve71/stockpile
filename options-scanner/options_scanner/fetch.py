@@ -1,9 +1,15 @@
 """Cached chain-fetch helpers used by the scanner tabs.
 
-Wraps `chain.fetch_chain` with the IV-surface and earnings-annotation
-post-processing every tab needs before display. Both helpers are
-decorated with `@st.cache_data` so repeated reruns within a scan
-session (sidebar tweaks, filter changes) don't refetch.
+Wraps `chain.fetch_chain` with the earnings-annotation, IV-surface,
+and realized-vol post-processing every tab needs before display. Both
+helpers are decorated with `@st.cache_data` so repeated reruns within
+a scan session (sidebar tweaks, filter changes) don't refetch.
+
+Pipeline order matters: earnings are annotated *before* the surface
+fit so the `exclude_earnings` filter can see `earnings_count`. The
+surface is then fit and scored via the pluggable filter / algorithm /
+score configs, and the scan snapshot is recorded for the percentile
+score's history.
 
 Two flavors:
 
@@ -22,50 +28,89 @@ established convention in this codebase.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
+from options_scanner.iv_algorithms import DEFAULT_CONFIG as ALGO_DEFAULT, AlgorithmConfig
 from options_scanner.iv_filters import DEFAULT_CONFIG, SurfaceFilterConfig
+from options_scanner.iv_scores import DEFAULT_CONFIG as SCORE_DEFAULT, ScoreConfig
+
+
+def _enrich(df: pd.DataFrame, ticker: str,
+            surface_filters: SurfaceFilterConfig,
+            algo_config: AlgorithmConfig,
+            score_config: ScoreConfig) -> pd.DataFrame:
+    """Annotate earnings, fit + score the surface, attach realized vol,
+    and record the snapshot. Shared by both fetch helpers."""
+    from options_scanner.iv_surface import compute_iv_excess
+    from options_scanner.iv_scores import ScoreContext
+    from options_scanner.earnings import fetch_earnings_dates, annotate_earnings
+    from options_scanner import iv_history
+    from stocks_shared.yahoo import realized_vol
+
+    earnings = fetch_earnings_dates(ticker)
+    df = annotate_earnings(df, earnings)
+
+    hv = realized_vol(ticker)
+    ctx = ScoreContext(ticker=ticker, hv_20=hv, history=iv_history)
+    df = compute_iv_excess(
+        df, surface_filters=surface_filters, algo_config=algo_config,
+        score_config=score_config, ctx=ctx,
+    )
+
+    df["hv_20"] = hv
+    df["vr_ratio"] = (df["iv"] / hv) if (np.isfinite(hv) and hv > 0) \
+        else float("nan")
+
+    iv_history.record_scan(ticker, df)
+    return df, earnings
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_and_enrich(ticker: str, opt_type: str, min_dte: int,
                      max_dte: int | None, provider: str = "yahoo",
                      schwab_config: dict | None = None,
-                     surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG):
+                     surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
+                     algo_config: AlgorithmConfig = ALGO_DEFAULT,
+                     score_config: ScoreConfig = SCORE_DEFAULT,
+                     moomoo_config: dict | None = None):
     from options_scanner.chain import fetch_chain
-    from options_scanner.iv_surface import compute_iv_excess
-    from options_scanner.earnings import fetch_earnings_dates, annotate_earnings
     try:
         df = fetch_chain(ticker, opt_type=opt_type, min_dte=min_dte,
                          max_dte=max_dte, provider=provider,
-                         schwab_config=schwab_config)
-    except ValueError as exc:
+                         schwab_config=schwab_config,
+                         moomoo_config=moomoo_config)
+    except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
         return pd.DataFrame(), [], str(exc)
+    except Exception as exc:  # noqa: BLE001 — surface Moomoo/Schwab SDK errors
+        return pd.DataFrame(), [], f"{type(exc).__name__}: {exc}"
     if df.empty:
         return df, [], None
-    df = compute_iv_excess(df, surface_filters=surface_filters)
-    earnings = fetch_earnings_dates(ticker)
-    df = annotate_earnings(df, earnings)
+    df, earnings = _enrich(df, ticker, surface_filters, algo_config,
+                           score_config)
     return df, earnings, None
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
                    schwab_config: dict | None = None,
-                   surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG):
+                   surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
+                   algo_config: AlgorithmConfig = ALGO_DEFAULT,
+                   score_config: ScoreConfig = SCORE_DEFAULT,
+                   moomoo_config: dict | None = None):
     """Cached per-ticker chain fetch for portfolio tab."""
     from options_scanner.chain import fetch_chain
-    from options_scanner.iv_surface import compute_iv_excess
-    from options_scanner.earnings import fetch_earnings_dates, annotate_earnings
     try:
         df = fetch_chain(ticker, opt_type="calls", min_dte=min_dte,
-                         provider=provider, schwab_config=schwab_config)
-    except ValueError as exc:
+                         provider=provider, schwab_config=schwab_config,
+                         moomoo_config=moomoo_config)
+    except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
         return pd.DataFrame(), [], str(exc)
+    except Exception as exc:  # noqa: BLE001 — surface Moomoo/Schwab SDK errors
+        return pd.DataFrame(), [], f"{type(exc).__name__}: {exc}"
     if df.empty:
         return df, [], None
-    df = compute_iv_excess(df, surface_filters=surface_filters)
-    earnings = fetch_earnings_dates(ticker)
-    df = annotate_earnings(df, earnings)
+    df, earnings = _enrich(df, ticker, surface_filters, algo_config,
+                           score_config)
     return df, earnings, None

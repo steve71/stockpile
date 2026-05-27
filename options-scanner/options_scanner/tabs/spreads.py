@@ -338,6 +338,7 @@ def _render_view(
                 ticker_clean, "both", int(min_dte), int(max_dte),
                 st.session_state.get("data_source", "yahoo"),
                 st.session_state.get("schwab_config"),
+                moomoo_config=st.session_state.get("moomoo_config"),
             )
 
         if err:

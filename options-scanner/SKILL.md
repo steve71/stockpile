@@ -79,6 +79,10 @@ Do **not** use when:
 | `--max-delta` | 0.75 | Exclude deep ITM options |
 | `--data-source` | config | `yahoo` (free, may be stale) or `schwab` (real-time) |
 | `--no-legend` | off | Suppress the "how to read" footer in terminal output |
+| `--preset` | current | Surface-fit preset: `current` (global poly + raw IV+pp) or `v2` (per-expiration spread-weighted, earnings excluded, z-score) |
+| `--algorithm` | preset | Surface-fit algorithm: `global_poly` or `per_expiration` |
+| `--fit-weights` | none | Fit weighting (with `--algorithm`): `none`, `oi`, or `inv_spread` |
+| `--score` | preset | Ranking score: `raw_pp`, `zscore`, `relative`, `composite_exec`, `vrp`, `percentile` |
 
 ## JSON Output Schema (`--agent` or `--json`)
 
@@ -103,16 +107,28 @@ objects.
       "mid": 1.53,
       "iv_pct": 28.5,
       "iv_pp": 6.2,
+      "signal_score": 0.062,
+      "signal_kind": "IV+pp",
       "delta": 0.28,
       "ann_pct": 4.8,
       "open_interest": 1250,
-      "earnings_before_exp": false
+      "earnings_before_exp": false,
+      "hv_20": 0.241,
+      "vr_ratio": 1.18
     }
   ]
 }
 ```
 
-`net_credit` is added to each candidate when `--roll` is used.
+- `signal_score` is the value the candidates are ranked by; `signal_kind`
+  names the active score (defaults to `IV+pp`, where `signal_score`
+  equals `iv_pp / 100`). With another `--score`, `signal_score` is in
+  that score's own units (σ for z-score, ratio for VRP, 0–100 for
+  percentile).
+- `hv_20` is 20-day annualized realized vol; `vr_ratio = iv / hv_20`.
+  Both are `null` when price history is unavailable. `vr_ratio` and
+  `percentile` may be `null` during cold start.
+- `net_credit` is added to each candidate when `--roll` is used.
 
 ## Reading IV+pp
 

@@ -16,7 +16,7 @@ function the bottom table uses — so chart and table never disagree.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import altair as alt
 import pandas as pd
@@ -35,7 +35,9 @@ _PROVIDER_LINE = {
 def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
                   min_oi: int, top_n: int, buy: bool,
                   ticker: str = "", key_prefix: str = "s",
-                  min_vol: int = 0, provider: str = "yahoo") -> None:
+                  min_vol: int = 0, provider: str = "yahoo",
+                  earnings_dates: list | None = None,
+                  surface_filters: tuple | None = None) -> None:
     """Layered chart: per-expiration smile with the table's top-N picks
     highlighted. Faded background dots are the rest of the chain at the
     selected expiration; bright outlined dots are the top picks."""
@@ -63,6 +65,12 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     chart_df["FittedIV%"] = (chart_df["iv_fitted"] * 100).round(2)
     chart_df["IV+pp"]     = (chart_df["iv_excess"] * 100).round(2)
     chart_df["Ann%"]      = chart_df["ann_yield_pct"].round(2)
+    from options_scanner import iv_scores as _iv_scores
+    _score_kind = _iv_scores.active_kind(chart_df)
+    _show_score = _score_kind != "IV+pp" and "signal_score" in chart_df.columns
+    if _show_score:
+        _mult, _ = _iv_scores.display_for(_score_kind)
+        chart_df[_score_kind] = (chart_df["signal_score"] * _mult).round(2)
     exp_dte = chart_df.groupby("expiration")["dte"].first().to_dict()
     chart_df["ExpLabel"] = chart_df["expiration"].apply(
         lambda d: (f"{datetime.strptime(d, '%Y-%m-%d').strftime('%b %d \'%y')}"
@@ -118,6 +126,44 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     if sub.empty:
         return
 
+    # Warn when this expiration's line isn't a fit to its own contracts.
+    _fit_method = (str(sub["fit_method"].iloc[0])
+                   if "fit_method" in sub.columns else "")
+    if _fit_method == "fallback":
+        _exp_date = datetime.strptime(chosen_exp, "%Y-%m-%d").date()
+        _excl_earn = surface_filters and any(
+            n == "exclude_earnings" for n, _ in surface_filters
+        )
+        _earn_spans = earnings_dates and any(
+            date.today() < ed <= _exp_date for ed in earnings_dates
+        )
+        if _excl_earn and _earn_spans:
+            st.warning(
+                f"**{exp_labels[chosen_exp]}** has an earnings event before "
+                "expiration — the earnings-exclusion filter removed those "
+                "contracts from the fit, leaving too few to fit this slice "
+                "locally. The line shown is the cross-expiration surface. "
+                "Earnings IV premium still shows up as positive IV+pp.",
+                icon="⚠️",
+            )
+        else:
+            st.warning(
+                f"The per-expiry fit couldn't fit **{exp_labels[chosen_exp]}** "
+                "from its own contracts (too few passed the surface-fit "
+                "filters), so this line is the cross-expiration surface — it "
+                "may not reflect this expiry's own smile. Switch the **Fit:** "
+                "toggle to *Global*, or relax the surface-fit filters / widen "
+                "the DTE range.",
+                icon="⚠️",
+            )
+    elif _fit_method == "none":
+        st.warning(
+            "Not enough clean contracts to fit a surface for this scan, so "
+            "the line just traces the quotes (IV+pp ≈ 0). Widen the DTE "
+            "range or relax the surface-fit filters.",
+            icon="⚠️",
+        )
+
     iv_cols = ["IV%", "FittedIV%"]
     y_min = max(0.0, float(sub[iv_cols].values.min()) * 0.92)
     y_max = float(sub[iv_cols].values.max()) * 1.05
@@ -143,12 +189,19 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     y_scale = alt.Scale(domain=[y_min, y_max])
     base_y = alt.Y("IV%:Q", title="Implied Volatility (%)", scale=y_scale)
 
+    # D3 number formats for each score kind (Altair tooltips use D3, not printf).
+    _SCORE_D3_FMT = {"IV z": "+.2f", "IV rel": "+.1%", "Score": "+.2f",
+                     "VRP": ".2f", "IV %ile": ".0f"}
+    _score_d3_fmt = _SCORE_D3_FMT.get(_score_kind, "+.2f")
     tooltip_fields = [
         alt.Tooltip("strike:Q",       title="Strike",          format="$,.0f"),
         alt.Tooltip("type:N",         title="Type"),
         alt.Tooltip("IV%:Q",                                   format=".1f"),
         alt.Tooltip("FittedIV%:Q",    title="Surface IV%",     format=".1f"),
         alt.Tooltip("IV+pp:Q",        title="IV excess (pp)",  format="+.1f"),
+        *([alt.Tooltip(f"{_score_kind}:Q", title=_score_kind,
+                       format=_score_d3_fmt)]
+          if _show_score else []),
         alt.Tooltip("delta:Q",                                 format=".2f"),
         alt.Tooltip("Ann%:Q",         title="Ann%",            format=".1f"),
         alt.Tooltip("volume:Q",       title="Volume",          format=",.0f"),

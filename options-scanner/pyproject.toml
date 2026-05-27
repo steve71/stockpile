@@ -10,6 +10,7 @@ dependencies = [
     "tabulate",
     "yfinance",
     "schwab-py",
+    "moomoo-api",
 ]
 
 [dependency-groups]

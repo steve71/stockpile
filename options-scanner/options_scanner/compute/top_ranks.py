@@ -19,8 +19,10 @@ def compute_top_ranks(df: pd.DataFrame, mode: str, buy: bool,
     """Return {(type, strike, expiration): rank} for top-N candidates.
 
     Rank is 1-indexed per option type. Selling ranks by descending
-    iv_excess (richest first); buying ranks by ascending iv_excess
-    (cheapest first). open_interest is the tiebreaker.
+    signal_score (richest first); buying ranks by ascending
+    signal_score (cheapest first). signal_score defaults to iv_excess
+    (falls back to it when the column is absent). open_interest is the
+    tiebreaker.
 
     Args:
         df: Chain DataFrame with columns `type`, `strike`, `expiration`,
@@ -38,6 +40,7 @@ def compute_top_ranks(df: pd.DataFrame, mode: str, buy: bool,
     if df.empty:
         return {}
     iv_asc = buy
+    sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
     pick_types = ["call", "put"] if mode == "both" else [mode]
     ranks: dict[tuple[str, float, str], int] = {}
     for t in pick_types:
@@ -45,7 +48,7 @@ def compute_top_ranks(df: pd.DataFrame, mode: str, buy: bool,
             df[(df["type"] == t)
                & (df["open_interest"] >= min_oi)
                & (df["volume"] >= min_vol)]
-            .sort_values(["iv_excess", "open_interest"],
+            .sort_values([sort_col, "open_interest"],
                          ascending=[iv_asc, False])
             .head(top_n)
             .reset_index(drop=True)

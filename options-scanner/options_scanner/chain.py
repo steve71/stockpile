@@ -111,16 +111,22 @@ def _fetch_chain_yahoo(ticker: str, opt_type: str = "both",
 def fetch_chain(ticker: str, opt_type: str = "both",
                 min_dte: int = 30, max_dte: int | None = 90,
                 provider: str = "yahoo",
-                schwab_config: dict | None = None) -> pd.DataFrame:
+                schwab_config: dict | None = None,
+                moomoo_config: dict | None = None) -> pd.DataFrame:
     """Return enriched DataFrame of options with min_dte <= DTE <= max_dte.
 
     opt_type: "both", "calls", or "puts"
     max_dte:  upper DTE limit; None = no limit
-    provider: "yahoo" (default) or "schwab"
+    provider: "yahoo" (default), "schwab", or "moomoo"
     schwab_config: dict with app_key, app_secret, callback_url, token_file
+    moomoo_config: dict with host, port (OpenD gateway address)
     """
     if provider == "schwab":
         from options_scanner.schwab_chain import fetch_chain_schwab
         return fetch_chain_schwab(ticker, opt_type, min_dte, max_dte,
                                   schwab_config)
+    if provider == "moomoo":
+        from options_scanner.moomoo_chain import fetch_chain_moomoo
+        return fetch_chain_moomoo(ticker, opt_type, min_dte, max_dte,
+                                  moomoo_config)
     return _fetch_chain_yahoo(ticker, opt_type, min_dte, max_dte)

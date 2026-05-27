@@ -87,6 +87,8 @@ def fetch_chain_schwab(ticker: str, opt_type: str = "both",
                         iv=safe_float(opt.get("volatility")) / 100.0,
                         delta=safe_float(opt.get("delta")),
                         gamma=safe_float(opt.get("gamma")),
+                        theta=safe_float(opt.get("theta")),
+                        vega=safe_float(opt.get("vega")),
                         open_interest=safe_int(opt.get("openInterest")),
                         volume=safe_int(opt.get("totalVolume")),
                     )

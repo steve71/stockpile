@@ -17,6 +17,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+from options_scanner import iv_scores
 from options_scanner.ui_theme import empty_state
 
 from options_scanner.display.chain_styling import (
@@ -52,7 +53,8 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
         return
 
     rank_col = {"Top": sub["_rank"]} if "_rank" in sub.columns else {}
-    disp = pd.DataFrame({
+    kind = iv_scores.active_kind(sub)
+    cols = {
         **rank_col,
         "Strike": sub["strike"].apply(lambda x: f"${x:.0f}"),
         "Expiration": sub["expiration"].apply(
@@ -64,11 +66,18 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
         "Mid":    sub["mid"].round(2),
         "IV%":    (sub["iv"] * 100).round(1),
         "IV+pp":  (sub["iv_excess"] * 100).round(1),
+    }
+    # When a non-default score drives the ranking, show it alongside IV+pp.
+    if kind != "IV+pp":
+        mult, _ = iv_scores.display_for(kind)
+        cols[kind] = (sub["signal_score"] * mult).round(2)
+    cols.update({
         "Delta":  sub["delta"].round(2),
         "Ann%":   sub["ann_yield_pct"].round(1),
         "OI":     sub["open_interest"],
         "Vol":    sub["volume"],
     })
+    disp = pd.DataFrame(cols)
     if roll_close_cost is not None:
         disp["NetCr"] = (sub["mid"] - roll_close_cost).round(2)
 
@@ -115,6 +124,12 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
                                                width=65,
                                                help=vol_help_for(min_vol)),
     })
+    if kind != "IV+pp":
+        _, fmt = iv_scores.display_for(kind)
+        col_cfg[kind] = st.column_config.NumberColumn(
+            kind, format=fmt, width=85,
+            help="Active ranking score — the chain is ranked by this "
+                 "column. IV+pp shown alongside for context.")
     if roll_close_cost is not None:
         col_cfg["NetCr"] = st.column_config.NumberColumn("Net Credit",
                                                          format="$%+.2f",
@@ -132,19 +147,20 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
     """Filter, rank, and render the top-N per option type.
 
     Splits the chain by `mode` ("call", "put", or "both"), sorts by
-    iv_excess (descending for sell mode, ascending for buy mode),
-    applies the OI/Vol floors, takes the top N, and delegates to
-    `show_df`. Adds a subheader when rendering both sides so the
-    user knows which table is which.
+    signal_score (descending for sell mode, ascending for buy mode;
+    defaults to iv_excess), applies the OI/Vol floors, takes the top
+    N, and delegates to `show_df`. Adds a subheader when rendering
+    both sides so the user knows which table is which.
     """
     iv_asc = buy
+    sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
     type_labels = {"call": "Calls", "put": "Puts"}
     to_show = [mode] if mode in type_labels else list(type_labels.keys())
 
     for opt_type in to_show:
         sub = (
             df[df["type"] == opt_type]
-            .sort_values(["iv_excess", "open_interest"], ascending=[iv_asc, False])
+            .sort_values([sort_col, "open_interest"], ascending=[iv_asc, False])
         )
         sub = sub[(sub["open_interest"] >= min_oi)
                   & (sub["volume"] >= min_vol)].head(top_n)

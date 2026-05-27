@@ -129,6 +129,7 @@ def tab_gex() -> None:
                 t, "both", 0, 60,
                 st.session_state.get("data_source", "yahoo"),
                 st.session_state.get("schwab_config"),
+                moomoo_config=st.session_state.get("moomoo_config"),
             )
             if err:
                 failed.append((t, err))

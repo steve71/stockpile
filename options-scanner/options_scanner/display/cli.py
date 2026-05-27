@@ -2,6 +2,8 @@
 
 from datetime import date, datetime, timedelta
 
+from options_scanner import iv_scores
+
 
 def _fmt_exp(exp_str: str) -> str:
     return datetime.strptime(exp_str, "%Y-%m-%d").strftime("%b %d '%y")
@@ -44,14 +46,17 @@ def print_results(
     type_labels = {"call": "CALLS", "put": "PUTS"}
     to_show = [mode] if mode in type_labels else list(type_labels.keys())
 
-    # Selling: highest IV excess first. Buying: lowest (most negative) first.
+    # Selling: highest signal first. Buying: lowest (most negative) first.
     iv_asc = buy
+    sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
+    kind = iv_scores.active_kind(df)
+    score_mult, score_fmt = iv_scores.display_for(kind)
 
     for opt_type in to_show:
         label = type_labels[opt_type]
         sub = (
             df[df["type"] == opt_type]
-            .sort_values(["iv_excess", "open_interest"], ascending=[iv_asc, False])
+            .sort_values([sort_col, "open_interest"], ascending=[iv_asc, False])
             .head(top_n)
         )
         if sub.empty:
@@ -80,6 +85,9 @@ def print_results(
                 "Ann%": f"{r['ann_yield_pct']:.1f}",
                 "OI": f"{r['open_interest']:,}",
             }
+            if kind != "IV+pp" and "signal_score" in r:
+                _sv = r["signal_score"]
+                row[kind] = "" if _sv != _sv else score_fmt % (_sv * score_mult)
             if roll_close_cost is not None:
                 row["NetCr"] = f"${r['net_credit']:+.2f}"
             rows.append(row)

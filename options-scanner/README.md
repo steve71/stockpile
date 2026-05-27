@@ -514,14 +514,6 @@ data.
 
 Planned improvements, roughly in priority order:
 
-- **Index ticker normalization** — implemented. Yahoo Finance uses
-  `^SPX`, `^NDX`, etc.; Schwab uses `$SPX`, `$NDX`, etc. Typing the
-  bare name (`SPX`, `NDX`, …) works with both data sources.
-
-- **GEX (Gamma Exposure)** — implemented in the web UI single-ticker
-  tab. See the [Gamma Exposure section](#gamma-exposure-gex) above
-  for full documentation.
-
 - **IV Rank / IV Percentile (IVR/IVP)** — show how current IV compares
   to its 52-week range. High IVR means premiums are rich relative to
   recent history — the most important context for deciding whether to
@@ -542,6 +534,9 @@ Planned improvements, roughly in priority order:
 
 - **Interactive Brokers CSV support** — several users have requested
   this. Waiting on an example export file to spec the parser.
+
+- **TastyTrade CSV support and investigate using as data source ** —
+- user has requested this. Requres R&D, TT Volunteer contributers?
 
 - **GEX on portfolio tab** — extend the GEX chart to each position
   in the portfolio scan, not just the single-ticker tab.

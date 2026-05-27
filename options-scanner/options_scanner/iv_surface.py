@@ -1,21 +1,26 @@
-"""Fit a 2-D IV surface and compute per-option IV excess.
+"""Fit an IV surface and score each option's distance from it.
 
-Surface model: IV ≈ a + b·m + c·m² + d·√T + e·m·√T
-where m = log(K/S) and T = DTE/365.
+This orchestrates a three-stage, pluggable pipeline:
 
-The regression is run only on options that pass the surface filter
-pipeline (see iv_filters.py). By default this is OTM-only + spread
-≤ 50% + |delta| 0.05–0.95, which excludes deep-ITM/OTM options whose
-IVs are distorted by put-call parity and low liquidity. All options
-still receive iv_fitted and iv_excess; only the fit itself is filtered.
+1. Filter   (iv_filters)    — which options feed the fit.
+2. Algorithm (iv_algorithms) — produces iv_fitted for every row.
+3. Score    (iv_scores)     — produces signal_score, the ranking key.
 
-Options sitting above the surface are priced rich — good candidates
-to sell.
+The defaults (global-polynomial fit + raw IV+pp score + OTM/spread/
+delta filters) reproduce the original behavior exactly, so nothing
+changes until the caller selects another algorithm or score.
+
+Surface model (default algorithm): IV ≈ a + b·m + c·m² + d·√T + e·m·√T
+where m = log(K/S) and T = DTE/365. Options sitting above the surface
+are IV-rich — candidates to sell; below, IV-cheap.
+
+Output is a screening heuristic, not a mispricing claim.
 """
 
 import numpy as np
 import pandas as pd
 
+from options_scanner import iv_algorithms, iv_scores
 from options_scanner.iv_filters import (
     DEFAULT_CONFIG, SurfaceFilterConfig, apply as _apply_filters,
 )
@@ -24,54 +29,49 @@ from options_scanner.iv_filters import (
 def compute_iv_excess(
     df: pd.DataFrame,
     surface_filters: SurfaceFilterConfig | None = None,
+    algo_config: iv_algorithms.AlgorithmConfig | None = None,
+    score_config: iv_scores.ScoreConfig | None = None,
+    ctx: iv_scores.ScoreContext | None = None,
 ) -> pd.DataFrame:
-    """Add iv_fitted and iv_excess columns to the chain DataFrame.
+    """Add iv_fitted, iv_excess, signal_score and signal_kind columns.
 
-    surface_filters selects which rows participate in the regression.
-    All rows still receive iv_fitted / iv_excess values. Defaults to
-    iv_filters.DEFAULT_CONFIG when None.
+    surface_filters / algo_config / score_config select the three
+    pipeline stages; each defaults to the module's DEFAULT_CONFIG when
+    None, reproducing the original surface and ranking. ctx carries
+    ticker-level context (realized vol, history) some scores need.
+
+    All rows receive iv_fitted / iv_excess / signal_score; only the
+    surface fit itself is filtered.
     """
     if surface_filters is None:
         surface_filters = DEFAULT_CONFIG
+    if algo_config is None:
+        algo_config = iv_algorithms.DEFAULT_CONFIG
+    if score_config is None:
+        score_config = iv_scores.DEFAULT_CONFIG
 
-    df = df.copy()
+    df = df.copy().reset_index(drop=True)
 
+    # Stage 1 — which rows anchor the fit.
     valid = df[(df["iv"] > 0.02) & (df["dte"] > 0)]
-    valid = _apply_filters(valid, surface_filters)
-    if len(valid) < 5:
+    fit_subset = _apply_filters(valid, surface_filters)
+    fit_mask = df.index.isin(fit_subset.index)
+
+    # Stage 2 — fit the surface (None → flat fallback). `methods` labels
+    # how each row was fit so the chart can warn on fallback expirations.
+    iv_fitted, methods = iv_algorithms.fit(
+        df, fit_mask, algo_config, return_methods=True)
+    if iv_fitted is None:
         df["iv_fitted"] = df["iv"]
         df["iv_excess"] = 0.0
-        return df
+        df["fit_method"] = "none"
+    else:
+        df["iv_fitted"] = iv_fitted
+        df["iv_excess"] = df["iv"] - df["iv_fitted"]
+        df["fit_method"] = methods if methods is not None else "global"
 
-    m = valid["log_moneyness"].values
-    sqrt_T = np.sqrt(valid["dte"].values / 365.0)
-    iv = valid["iv"].values
-
-    X = np.column_stack([
-        np.ones_like(m),
-        m,
-        m ** 2,
-        sqrt_T,
-        m * sqrt_T,
-    ])
-
-    try:
-        coeffs, _, _, _ = np.linalg.lstsq(X, iv, rcond=None)
-    except np.linalg.LinAlgError:
-        df["iv_fitted"] = df["iv"]
-        df["iv_excess"] = 0.0
-        return df
-
-    m_all = df["log_moneyness"].values
-    sqrt_T_all = np.sqrt(df["dte"].values / 365.0)
-    X_all = np.column_stack([
-        np.ones_like(m_all),
-        m_all,
-        m_all ** 2,
-        sqrt_T_all,
-        m_all * sqrt_T_all,
-    ])
-
-    df["iv_fitted"] = X_all @ coeffs
-    df["iv_excess"] = df["iv"] - df["iv_fitted"]
+    # Stage 3 — score each row relative to the surface.
+    signal, kind = iv_scores.score(df, fit_mask, ctx, score_config)
+    df["signal_score"] = signal
+    df["signal_kind"] = kind
     return df

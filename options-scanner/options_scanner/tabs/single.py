@@ -33,10 +33,47 @@ from options_scanner.display.spot_meta import (
     spot_value_html,
 )
 from options_scanner.fetch import fetch_and_enrich
-from options_scanner.iv_filters import SurfaceFilterConfig
+from options_scanner import iv_algorithms, iv_scores
+from options_scanner.iv_filters import DEFAULT_CONFIG as FILTER_DEFAULT, SurfaceFilterConfig
 from options_scanner.mc_ui import position_from_chain_row, render_mc_panel
 from options_scanner.recent_scans import build_label, load as load_recent, save as save_recent
 from options_scanner.ui_theme import badge, empty_state, metric_card, section_header
+
+
+# Surface-fit presets — shared by the preset pill and the advanced section
+# (which renders below the Scan button in tab_single).
+_V2_FILTERS_SF: SurfaceFilterConfig = FILTER_DEFAULT + (
+    ("exclude_earnings", frozenset()),
+)
+_SF_PRESETS = {
+    "Global": (
+        FILTER_DEFAULT,
+        ("global_poly", frozenset()),
+        ("raw_pp", frozenset()),
+    ),
+    "Per-expiry": (
+        _V2_FILTERS_SF,
+        ("per_expiration", frozenset({("weights", "inv_spread")})),
+        ("zscore", frozenset()),
+    ),
+}
+
+
+def _surface_fit_controls() -> str:
+    """Render the Surface-fit preset pill; return the selected preset name.
+
+    The advanced-override checkbox and expander render below the Scan
+    button in tab_single() so they don't clutter the primary scan flow.
+    """
+    with st.container(key="surface_fit_pill"):
+        preset = st.radio(
+            "Fit:", list(_SF_PRESETS.keys()), horizontal=True,
+            key="s_sf_preset",
+            help="Surface fit. Global = one polynomial across the chain + "
+                 "raw IV+pp. Per-expiry (LGbengs) = per-expiration "
+                 "spread-weighted fit, earnings excluded, ranked by z-score.",
+        )
+    return preset
 
 
 def tab_single() -> None:
@@ -70,8 +107,8 @@ def tab_single() -> None:
         )
         st.session_state["s_min_dte"] = max(1, int(entry.get("min_dte", 30)))
         st.session_state["s_max_dte"] = int(entry.get("max_dte", 90))
-        st.session_state["s_min_oi"]  = int(entry.get("min_oi", 25))
-        st.session_state["s_min_vol"] = int(entry.get("min_vol", 10))
+        st.session_state["s_min_oi"]  = int(entry.get("min_oi", 1))
+        st.session_state["s_min_vol"] = int(entry.get("min_vol", 1))
         st.session_state["s_delta"]   = (_dmin, _dmax)
         st.session_state["s_top"]     = int(entry.get("top_n", 10))
         if entry.get("flow") == "roll":
@@ -156,8 +193,8 @@ def tab_single() -> None:
 
     # ── Group 3: Filters ──────────────────────────────────────────────────────
     with st.container(border=True):
-        n1, n2, n3, n4, n5 = st.columns(
-            [1, 1, 1, 1, 5], vertical_alignment="top",
+        n1, n2, n3, n4, n5, n6 = st.columns(
+            [1, 1, 1, 1, 2, 1], vertical_alignment="top",
         )
         with n1:
             min_dte = st.number_input("Min DTE", value=30, min_value=1,
@@ -167,119 +204,147 @@ def tab_single() -> None:
                                           help="0 = no limit; otherwise ≥ Min DTE",
                                           key="s_max_dte")
         with n3:
-            min_oi = st.number_input("Min OI", value=25, min_value=0,
+            min_oi = st.number_input("Min OI", value=1, min_value=0,
                                      key="s_min_oi")
         with n4:
             min_vol = st.number_input(
-                "Min Vol", value=10, min_value=0,
+                "Min Vol", value=1, min_value=0,
                 key="s_min_vol",
             )
         with n5:
+            delta_range = st.slider("Delta Range (abs value)", 0.0, 1.0,
+                                    (0.10, 0.50), step=0.05, key="s_delta")
+        with n6:
+            top_n = st.number_input("Top N", value=10, min_value=1,
+                                    max_value=50, key="s_top")
+
+    # ── Surface fit preset pill ───────────────────────────────────────────────
+    preset = _surface_fit_controls()
+
+    # ── Scan row: button + market hours warning ───────────────────────────────
+    with st.container(key="scan_mh_row"):
+        s_scan, s_mh = st.columns([1, 5], vertical_alignment="center")
+        with s_scan:
+            with st.container(key="scan_btn_lift"):
+                scanned = st.button("Scan", type="primary",
+                                    use_container_width=True, key="s_scan_btn")
+        with s_mh:
             st.markdown(
-                "<div style='padding:0 0 0.4rem 1rem;'>"
+                "<div style='display:flex; align-items:center; "
+                "gap:0.75rem; padding-left:1rem;'>"
                 + badge("MARKET HOURS RECOMMENDED", "warn")
-                + "<p style='color:var(--osc-destructive); font-weight:700; font-size:0.78rem; "
-                "margin:0.45rem 0 0 0; line-height:1.4;'>"
-                "Pre/post-market quotes may be stale or missing — IV+pp "
-                "rankings depend on fresh data.</p></div>",
+                + "<span style='color:var(--osc-destructive); font-weight:700; "
+                "font-size:0.78rem;'>"
+                "Pre/post-market quotes may be stale or missing.</span></div>",
                 unsafe_allow_html=True,
             )
 
-    # ── Surface fit filters (advanced, collapsed by default) ─────────────────
-    with st.expander("Surface fit filters", expanded=False):
-        st.caption(
-            "Controls which options are included in the IV surface regression "
-            "that produces IV+pp. Filters apply only to the fit — all options "
-            "still appear in the chart and table."
-        )
-        sf1, sf2 = st.columns([1, 2])
-        with sf1:
-            sf_otm = st.checkbox("OTM only", value=True, key="s_sf_otm",
-                                 help="Calls K > S, puts K < S. Removes deep-ITM "
-                                      "options whose IVs are distorted by "
-                                      "put-call parity and low liquidity.")
-        with sf1:
-            sf_use_spread = st.checkbox("Spread filter", value=True,
-                                        key="s_sf_use_spread",
-                                        help="Remove options with wide bid-ask "
-                                             "spreads relative to mid-price.")
-        with sf2:
-            sf_spread_pct = st.number_input(
-                "Max spread % of mid", value=50, min_value=1, max_value=200,
-                step=1, key="s_sf_spread_pct", disabled=not sf_use_spread,
-                help="Options where (ask−bid)/mid exceeds this are excluded.",
-            )
-        with sf1:
-            sf_use_delta = st.checkbox("Delta range", value=True,
-                                       key="s_sf_use_delta",
-                                       help="Exclude deep-ITM and deep-OTM "
-                                            "options from the surface fit.")
-        with sf2:
-            _dcols = st.columns(2)
-            sf_delta_lo = _dcols[0].number_input(
-                "Min |Δ|", value=0.05, min_value=0.0, max_value=0.49,
-                step=0.01, format="%.2f", key="s_sf_delta_lo",
-                disabled=not sf_use_delta,
-            )
-            sf_delta_hi = _dcols[1].number_input(
-                "Max |Δ|", value=0.95, min_value=0.51, max_value=1.0,
-                step=0.01, format="%.2f", key="s_sf_delta_hi",
-                disabled=not sf_use_delta,
-            )
-        _oi_c1, _oi_c2 = st.columns([1, 2])
-        with _oi_c1:
-            sf_use_min_oi = st.checkbox("Min OI for fit", value=False,
-                                        key="s_sf_use_min_oi",
-                                        help="Require minimum open interest "
-                                             "in the surface fit (separate from "
-                                             "the display Min OI filter above).")
-        with _oi_c2:
-            sf_min_oi_val = st.number_input(
-                "Min OI", value=1, min_value=1, key="s_sf_min_oi_val",
-                disabled=not sf_use_min_oi,
-            )
+    st.divider()
 
-    # Build hashable filter config from current widget values
-    _sf: list[tuple[str, frozenset]] = []
-    if sf_otm:
-        _sf.append(("otm_only", frozenset()))
-    if sf_use_spread:
-        _sf.append(("spread_pct", frozenset({("max_pct", sf_spread_pct / 100)})))
-    if sf_use_delta:
-        _sf.append(("delta_range", frozenset({("lo", sf_delta_lo),
-                                              ("hi", sf_delta_hi)})))
-    if sf_use_min_oi:
-        _sf.append(("min_oi", frozenset({("min_oi", sf_min_oi_val)})))
-    surface_filter_config: SurfaceFilterConfig = tuple(_sf)
-
-    # ── Slider + Top N + Scan row ─────────────────────────────────────────────
-    # All three controls sit on one row. Layout (T=9):
-    #   Delta=2   → covers Min DTE + Max DTE width above
-    #   Top N=1   → aligns with Min OI (with CSS padding-left tweak)
-    #   spacer=1.10
-    #   Scan=1    → left-aligned with the orange warning text column
-    #               above (which starts after Min DTE/Max DTE/Min OI/Min
-    #               Vol, i.e. at 4 col-units + 4 gaps from the row's left
-    #               edge). 1 + G/col_unit ≈ 1.10 makes Scan's left edge
-    #               match exactly (assumes ~16px gap).
-    #   spacer=3.90
-    s1, s2, _, s3, _ = st.columns(
-        [2, 1, 1.10, 1, 3.90], vertical_alignment="bottom",
+    # ── Advanced surface fit (below scan row) ─────────────────────────────────
+    advanced = st.checkbox(
+        "Advanced surface fit — override the top-bar preset", value=False,
+        key="s_sf_advanced",
+        help="Compose the filter / algorithm / score stages by hand "
+             "instead of using the title-bar preset.",
     )
-    with s1:
-        delta_range = st.slider("Delta Range (abs value)", 0.0, 1.0,
-                                (0.10, 0.75), step=0.05, key="s_delta")
-    with s2:
-        with st.container(key="top_n_align"):
-            top_n = st.number_input("Top N", value=10, min_value=1,
-                                    max_value=50, key="s_top")
-    with s3:
-        # Wrapped so CSS can lift the button a few pixels above the row's
-        # bottom baseline (it otherwise sits flush with the bottom of the
-        # Top N input, which reads as too low against the input's label).
-        with st.container(key="scan_btn_lift"):
-            scanned = st.button("Scan", type="primary",
-                                use_container_width=True, key="s_scan_btn")
+
+    if not advanced:
+        surface_filter_config, algo_config, score_config = _SF_PRESETS[preset]
+    else:
+        with st.expander("Advanced surface fit", expanded=True):
+            st.caption(
+                "Filters choose which options feed the regression; the "
+                "algorithm fits the surface; the score is the number the "
+                "chain is ranked by. All options still appear in the table."
+            )
+
+            # ── Filters ──────────────────────────────────────────────────────
+            sf1, sf2 = st.columns([1, 2])
+            with sf1:
+                sf_otm = st.checkbox("OTM only", value=True, key="s_sf_otm",
+                                     help="Calls K > S, puts K < S.")
+                sf_use_spread = st.checkbox("Spread filter", value=True,
+                                            key="s_sf_use_spread")
+                sf_use_delta = st.checkbox("Delta range", value=True,
+                                           key="s_sf_use_delta")
+                sf_use_min_oi = st.checkbox("Min OI for fit", value=False,
+                                            key="s_sf_use_min_oi")
+                sf_excl_earn = st.checkbox("Exclude earnings", value=False,
+                                           key="s_sf_excl_earn",
+                                           help="Drop earnings-spanning options "
+                                                "from the fit — their IV premium "
+                                                "is legitimate event risk.")
+            with sf2:
+                sf_spread_pct = st.number_input(
+                    "Max spread % of mid", value=50, min_value=1, max_value=200,
+                    step=1, key="s_sf_spread_pct", disabled=not sf_use_spread,
+                )
+                _dcols = st.columns(2)
+                sf_delta_lo = _dcols[0].number_input(
+                    "Min |Δ|", value=0.05, min_value=0.0, max_value=0.49,
+                    step=0.01, format="%.2f", key="s_sf_delta_lo",
+                    disabled=not sf_use_delta,
+                )
+                sf_delta_hi = _dcols[1].number_input(
+                    "Max |Δ|", value=0.95, min_value=0.51, max_value=1.0,
+                    step=0.01, format="%.2f", key="s_sf_delta_hi",
+                    disabled=not sf_use_delta,
+                )
+                sf_min_oi_val = st.number_input(
+                    "Min OI", value=1, min_value=1, key="s_sf_min_oi_val",
+                    disabled=not sf_use_min_oi,
+                )
+
+            _sf: list[tuple[str, frozenset]] = []
+            if sf_otm:
+                _sf.append(("otm_only", frozenset()))
+            if sf_use_spread:
+                _sf.append(("spread_pct",
+                            frozenset({("max_pct", sf_spread_pct / 100)})))
+            if sf_use_delta:
+                _sf.append(("delta_range", frozenset({("lo", sf_delta_lo),
+                                                      ("hi", sf_delta_hi)})))
+            if sf_use_min_oi:
+                _sf.append(("min_oi", frozenset({("min_oi", sf_min_oi_val)})))
+            if sf_excl_earn:
+                _sf.append(("exclude_earnings", frozenset()))
+            surface_filter_config: SurfaceFilterConfig = tuple(_sf)
+
+            # ── Algorithm + weighting ────────────────────────────────────────
+            a1, a2 = st.columns(2)
+            algo_names = list(iv_algorithms.REGISTRY.keys())
+            algo_name = a1.selectbox(
+                "Algorithm", algo_names,
+                index=algo_names.index("global_poly"),
+                format_func=lambda n: iv_algorithms.REGISTRY[n]["label"],
+                key="s_sf_algo",
+            )
+            if not iv_algorithms.REGISTRY[algo_name].get("enabled", True):
+                st.info(f"{iv_algorithms.REGISTRY[algo_name]['label']} isn't "
+                        "available yet — using the global polynomial.")
+                algo_name = "global_poly"
+            weights = a2.selectbox(
+                "Fit weighting", ["none", "oi", "inv_spread"],
+                format_func={"none": "Equal", "oi": "By open interest",
+                             "inv_spread": "By 1 / spread"}.get,
+                key="s_sf_weights",
+            )
+            algo_config = (algo_name, frozenset({("weights", weights)}))
+
+            # ── Score ────────────────────────────────────────────────────────
+            score_names = list(iv_scores.REGISTRY.keys())
+            score_name = st.selectbox(
+                "Score (ranking key)", score_names,
+                index=score_names.index("raw_pp"),
+                format_func=lambda n: iv_scores.REGISTRY[n]["label"],
+                key="s_sf_score",
+            )
+            if not iv_scores.REGISTRY[score_name].get("enabled", True):
+                st.info(f"{iv_scores.REGISTRY[score_name]['label']} isn't "
+                        "available yet — using raw IV+pp.")
+                score_name = "raw_pp"
+            score_config = (score_name, frozenset())
 
     # ── Run scan on button click, store in session state ──────────────────────
     # Also triggers when the sticky "Rescan" pill below the results was
@@ -317,7 +382,8 @@ def tab_single() -> None:
                 ticker_clean, eff_opt_fetch, int(min_dte), max_dte_arg,
                 st.session_state.get("data_source", "yahoo"),
                 st.session_state.get("schwab_config"),
-                surface_filter_config,
+                surface_filter_config, algo_config, score_config,
+                moomoo_config=st.session_state.get("moomoo_config"),
             )
 
         if err:
@@ -375,6 +441,23 @@ def tab_single() -> None:
         st.session_state["scan_provider"] = st.session_state.get(
             "data_source", "yahoo"
         )
+        _adv = st.session_state.get("s_sf_advanced", False)
+        if not _adv:
+            st.session_state["scan_surface_label"] = st.session_state.get(
+                "s_sf_preset", "Global"
+            )
+        else:
+            _algo = st.session_state.get("s_sf_algo", "global_poly")
+            _score = st.session_state.get("s_sf_score", "raw_pp")
+            _algo_s = {"global_poly": "global poly",
+                       "per_expiration": "per-expiry poly"}.get(_algo, _algo)
+            _score_s = {"raw_pp": "raw IV+pp", "zscore": "z-score",
+                        "relative": "relative", "composite": "composite",
+                        "vrp": "VRP", "percentile": "percentile"}.get(
+                            _score, _score)
+            st.session_state["scan_surface_label"] = (
+                f"Advanced · {_algo_s} · {_score_s}"
+            )
         st.session_state["single_results"] = {
             "ticker": ticker_clean,
             "df": df,
@@ -526,7 +609,9 @@ def tab_single() -> None:
     show_iv_chart(df_filt, spot, mode_r, res["min_oi"], res["top_n"],
                    buy_r, ticker=ticker_r, key_prefix="s",
                    min_vol=res.get("min_vol", 0),
-                   provider=st.session_state.get("scan_provider", "yahoo"))
+                   provider=st.session_state.get("scan_provider", "yahoo"),
+                   earnings_dates=res.get("earnings_dates"),
+                   surface_filters=res.get("surface_filters"))
 
     show_gex_chart(df_r, spot,
                     provider=st.session_state.get("scan_provider", "yahoo"),

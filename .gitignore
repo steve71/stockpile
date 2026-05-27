@@ -32,6 +32,10 @@ charts/
 output/
 *.html
 
+# Scanner persistent cache (IV-history SQLite store, etc.)
+cache/
+options-scanner/cache/
+
 # Images
 *.png
 *.jpg

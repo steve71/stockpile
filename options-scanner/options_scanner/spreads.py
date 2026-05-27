@@ -117,6 +117,20 @@ def _mid_price(row) -> float:
     return (b + a) / 2 if b > 0 and a > 0 else m
 
 
+def _ng(r, col: str, default: float = 0.0) -> float:
+    """Safely read a Greek column from a merged row (Series or dict).
+
+    Returns `default` when the column is absent, None, or non-finite.
+    Used to pass broker-supplied Greeks into leg dicts so
+    `_spread_greeks` can prefer them over Black-Scholes when available.
+    """
+    try:
+        v = float(r.get(col, default) if hasattr(r, "get") else r[col])
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError, KeyError):
+        return default
+
+
 def _T(dte: int) -> float:
     return max(dte, 1) / 365.0
 
@@ -235,23 +249,42 @@ def build_legs_from_row(row: pd.Series) -> list[dict]:
 # ── Greek aggregation ─────────────────────────────────────────────────────────
 
 def _spread_greeks(legs: list[dict], spot: float, T: float) -> dict:
-    """T is the default time-to-expiry; legs may override via leg['T']."""
+    """T is the default time-to-expiry; legs may override via leg['T'].
+
+    When a leg carries ``native_theta`` or ``native_vega`` (non-zero),
+    all four native Greeks (delta/gamma/theta/vega) from that leg are
+    used directly — no Black-Scholes recalculation. This lets Moomoo
+    and Schwab chains pass their broker-supplied Greeks through
+    unchanged. Yahoo chains (theta=vega=0) fall back to BS as before.
+    """
     nd = ng = nt = nv = 0.0
     for leg in legs:
         qty = leg["qty"]
         K, iv, ot = leg["strike"], max(leg["iv"], 0.01), leg["type"]
         leg_T = leg.get("T", T)  # per-leg override (used by calendar spreads)
-        if leg_T <= 0 or iv < 0.001:
-            continue
-        d1, d2 = _d1d2(spot, K, leg_T, iv)
-        delta = _norm_cdf(d1) if ot == "call" else _norm_cdf(d1) - 1.0
-        gamma = _norm_pdf(d1) / (spot * iv * math.sqrt(leg_T))
-        theta = _bs_theta(spot, K, leg_T, iv, ot)
-        vega = _bs_vega(spot, K, leg_T, iv)
-        nd += qty * delta
-        ng += qty * gamma
-        nt += qty * theta
-        nv += qty * vega
+
+        n_theta = leg.get("native_theta", 0.0)
+        n_vega  = leg.get("native_vega",  0.0)
+
+        if n_theta != 0.0 or n_vega != 0.0:
+            # Broker-supplied Greeks — use all four directly
+            nd += qty * leg.get("native_delta", 0.0)
+            ng += qty * leg.get("native_gamma", 0.0)
+            nt += qty * n_theta
+            nv += qty * n_vega
+        else:
+            # Black-Scholes fallback (Yahoo, or broker legs with no Greek data)
+            if leg_T <= 0 or iv < 0.001:
+                continue
+            d1, d2 = _d1d2(spot, K, leg_T, iv)
+            delta = _norm_cdf(d1) if ot == "call" else _norm_cdf(d1) - 1.0
+            gamma = _norm_pdf(d1) / (spot * iv * math.sqrt(leg_T))
+            theta = _bs_theta(spot, K, leg_T, iv, ot)
+            vega  = _bs_vega(spot, K, leg_T, iv)
+            nd += qty * delta
+            ng += qty * gamma
+            nt += qty * theta
+            nv += qty * vega
     return {"net_delta": nd, "net_gamma": ng, "net_theta": nt, "net_vega": nv}
 
 
@@ -332,9 +365,13 @@ def build_bull_put_spreads(df, min_dte, max_dte, min_width, max_width,
         T = _T(int(r["dte_s"]))
         pop = prob_above(spot, r["breakeven1"], T, r["iv_s"])
         legs = [{"type": "put", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"]},
+                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
+                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
+                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
                 {"type": "put", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"]}]
+                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
+                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
+                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")}]
         g = _spread_greeks(legs, spot, T)
         rows.append({
             "strategy": "Bull Put Spread", "expiration": r["expiration"],
@@ -390,9 +427,13 @@ def build_bear_call_spreads(df, min_dte, max_dte, min_width, max_width,
         T = _T(int(r["dte_s"]))
         pop = 1 - prob_above(spot, r["breakeven1"], T, r["iv_s"])
         legs = [{"type": "call", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"]},
+                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
+                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
+                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
                 {"type": "call", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"]}]
+                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
+                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
+                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")}]
         g = _spread_greeks(legs, spot, T)
         rows.append({
             "strategy": "Bear Call Spread", "expiration": r["expiration"],
@@ -448,9 +489,13 @@ def build_bull_call_spreads(df, min_dte, max_dte, min_width, max_width,
         T = _T(int(r["dte_l"]))
         pop = prob_above(spot, r["breakeven1"], T, r["iv_l"])
         legs = [{"type": "call", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"]},
+                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
+                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
+                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")},
                 {"type": "call", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"]}]
+                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
+                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
+                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")}]
         g = _spread_greeks(legs, spot, T)
         rows.append({
             "strategy": "Bull Call Spread", "expiration": r["expiration"],
@@ -506,9 +551,13 @@ def build_bear_put_spreads(df, min_dte, max_dte, min_width, max_width,
         T = _T(int(r["dte_l"]))
         pop = 1 - prob_above(spot, r["breakeven1"], T, r["iv_l"])
         legs = [{"type": "put", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"]},
+                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
+                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
+                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")},
                 {"type": "put", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"]}]
+                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
+                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
+                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")}]
         g = _spread_greeks(legs, spot, T)
         rows.append({
             "strategy": "Bear Put Spread", "expiration": r["expiration"],
@@ -584,10 +633,18 @@ def build_iron_condors(df, min_dte, max_dte, min_width, max_width,
         pop = max(0.0, prob_above(spot, be1, T, iv_avg)
                   - prob_above(spot, be2, T, iv_avg))
         legs = [
-            {"type": "put",  "strike": r["strike_lp"], "qty": +1, "entry_mid": r["mid_lp"], "iv": r["iv_lp"]},
-            {"type": "put",  "strike": r["strike_sp"], "qty": -1, "entry_mid": r["mid_sp"], "iv": r["iv_sp"]},
-            {"type": "call", "strike": r["strike_sc"], "qty": -1, "entry_mid": r["mid_sc"], "iv": r["iv_sc"]},
-            {"type": "call", "strike": r["strike_lc"], "qty": +1, "entry_mid": r["mid_lc"], "iv": r["iv_lc"]},
+            {"type": "put",  "strike": r["strike_lp"], "qty": +1, "entry_mid": r["mid_lp"], "iv": r["iv_lp"],
+             "native_delta": _ng(r, "delta_lp"), "native_gamma": _ng(r, "gamma_lp"),
+             "native_theta": _ng(r, "theta_lp"), "native_vega":  _ng(r, "vega_lp")},
+            {"type": "put",  "strike": r["strike_sp"], "qty": -1, "entry_mid": r["mid_sp"], "iv": r["iv_sp"],
+             "native_delta": _ng(r, "delta_sp"), "native_gamma": _ng(r, "gamma_sp"),
+             "native_theta": _ng(r, "theta_sp"), "native_vega":  _ng(r, "vega_sp")},
+            {"type": "call", "strike": r["strike_sc"], "qty": -1, "entry_mid": r["mid_sc"], "iv": r["iv_sc"],
+             "native_delta": _ng(r, "delta_sc"), "native_gamma": _ng(r, "gamma_sc"),
+             "native_theta": _ng(r, "theta_sc"), "native_vega":  _ng(r, "vega_sc")},
+            {"type": "call", "strike": r["strike_lc"], "qty": +1, "entry_mid": r["mid_lc"], "iv": r["iv_lc"],
+             "native_delta": _ng(r, "delta_lc"), "native_gamma": _ng(r, "gamma_lc"),
+             "native_theta": _ng(r, "theta_lc"), "native_vega":  _ng(r, "vega_lc")},
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -676,10 +733,18 @@ def build_iron_butterflies(df, min_dte, max_dte, min_width, max_width,
                       - prob_above(spot, be2, T, iv_body))
 
             legs = [
-                {"type": "put",  "strike": float(lp_row["strike"]), "qty": +1, "entry_mid": float(lp_row["mid"]), "iv": float(lp_row["iv"])},
-                {"type": "put",  "strike": float(sp_row["strike"]), "qty": -1, "entry_mid": float(sp_row["mid"]), "iv": float(sp_row["iv"])},
-                {"type": "call", "strike": float(sc_row["strike"]), "qty": -1, "entry_mid": float(sc_row["mid"]), "iv": float(sc_row["iv"])},
-                {"type": "call", "strike": float(lc_row["strike"]), "qty": +1, "entry_mid": float(lc_row["mid"]), "iv": float(lc_row["iv"])},
+                {"type": "put",  "strike": float(lp_row["strike"]), "qty": +1, "entry_mid": float(lp_row["mid"]), "iv": float(lp_row["iv"]),
+                 "native_delta": _ng(lp_row, "delta"), "native_gamma": _ng(lp_row, "gamma"),
+                 "native_theta": _ng(lp_row, "theta"), "native_vega":  _ng(lp_row, "vega")},
+                {"type": "put",  "strike": float(sp_row["strike"]), "qty": -1, "entry_mid": float(sp_row["mid"]), "iv": float(sp_row["iv"]),
+                 "native_delta": _ng(sp_row, "delta"), "native_gamma": _ng(sp_row, "gamma"),
+                 "native_theta": _ng(sp_row, "theta"), "native_vega":  _ng(sp_row, "vega")},
+                {"type": "call", "strike": float(sc_row["strike"]), "qty": -1, "entry_mid": float(sc_row["mid"]), "iv": float(sc_row["iv"]),
+                 "native_delta": _ng(sc_row, "delta"), "native_gamma": _ng(sc_row, "gamma"),
+                 "native_theta": _ng(sc_row, "theta"), "native_vega":  _ng(sc_row, "vega")},
+                {"type": "call", "strike": float(lc_row["strike"]), "qty": +1, "entry_mid": float(lc_row["mid"]), "iv": float(lc_row["iv"]),
+                 "native_delta": _ng(lc_row, "delta"), "native_gamma": _ng(lc_row, "gamma"),
+                 "native_theta": _ng(lc_row, "theta"), "native_vega":  _ng(lc_row, "vega")},
             ]
             g = _spread_greeks(legs, spot, T)
 
@@ -761,9 +826,15 @@ def build_jade_lizards(df, min_dte, max_dte, min_width, max_width,
         T = _T(int(r["dte"]))
         pop = prob_above(spot, be1, T, float(r["iv"]))
         legs = [
-            {"type": "put",  "strike": float(r["strike"]),    "qty": -1, "entry_mid": float(r["mid"]),    "iv": float(r["iv"])},
-            {"type": "call", "strike": float(r["strike_sc"]), "qty": -1, "entry_mid": float(r["mid_sc"]), "iv": float(r["iv_sc"])},
-            {"type": "call", "strike": float(r["strike_lc"]), "qty": +1, "entry_mid": float(r["mid_lc"]), "iv": float(r["iv_lc"])},
+            {"type": "put",  "strike": float(r["strike"]),    "qty": -1, "entry_mid": float(r["mid"]),    "iv": float(r["iv"]),
+             "native_delta": _ng(r, "delta"),    "native_gamma": _ng(r, "gamma"),
+             "native_theta": _ng(r, "theta"),    "native_vega":  _ng(r, "vega")},
+            {"type": "call", "strike": float(r["strike_sc"]), "qty": -1, "entry_mid": float(r["mid_sc"]), "iv": float(r["iv_sc"]),
+             "native_delta": _ng(r, "delta_sc"), "native_gamma": _ng(r, "gamma_sc"),
+             "native_theta": _ng(r, "theta_sc"), "native_vega":  _ng(r, "vega_sc")},
+            {"type": "call", "strike": float(r["strike_lc"]), "qty": +1, "entry_mid": float(r["mid_lc"]), "iv": float(r["iv_lc"]),
+             "native_delta": _ng(r, "delta_lc"), "native_gamma": _ng(r, "gamma_lc"),
+             "native_theta": _ng(r, "theta_lc"), "native_vega":  _ng(r, "vega_lc")},
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -864,10 +935,14 @@ def build_calendar_spreads(df, min_dte, max_dte, min_width, max_width,
                     legs = [
                         {"type": opt_type, "strike": float(f_row["strike"]), "qty": -1,
                          "entry_mid": float(f_row["mid"]), "iv": float(f_row["iv"]),
-                         "T": T},
+                         "T": T,
+                         "native_delta": _ng(f_row, "delta"), "native_gamma": _ng(f_row, "gamma"),
+                         "native_theta": _ng(f_row, "theta"), "native_vega":  _ng(f_row, "vega")},
                         {"type": opt_type, "strike": float(b_row["strike"]), "qty": +1,
                          "entry_mid": float(b_row["mid"]), "iv": float(b_row["iv"]),
-                         "T": T_back},
+                         "T": T_back,
+                         "native_delta": _ng(b_row, "delta"), "native_gamma": _ng(b_row, "gamma"),
+                         "native_theta": _ng(b_row, "theta"), "native_vega":  _ng(b_row, "vega")},
                     ]
                     g = _spread_greeks(legs, spot, T)
                     rows.append({
@@ -956,11 +1031,17 @@ def build_ratio_spreads(df, min_dte, max_dte, min_width, max_width,
 
             legs = [
                 {"type": opt_type, "strike": float(r["strike_l"]), "qty": +1,
-                 "entry_mid": float(r["mid_l"]), "iv": float(r["iv_l"])},
+                 "entry_mid": float(r["mid_l"]), "iv": float(r["iv_l"]),
+                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
+                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")},
                 {"type": opt_type, "strike": float(r["strike_s"]), "qty": -1,
-                 "entry_mid": float(r["mid_s"]), "iv": float(r["iv_s"])},
+                 "entry_mid": float(r["mid_s"]), "iv": float(r["iv_s"]),
+                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
+                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
                 {"type": opt_type, "strike": float(r["strike_s"]), "qty": -1,
-                 "entry_mid": float(r["mid_s"]), "iv": float(r["iv_s"])},
+                 "entry_mid": float(r["mid_s"]), "iv": float(r["iv_s"]),
+                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
+                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
             ]
             g = _spread_greeks(legs, spot, T)
             label = "Call" if opt_type == "call" else "Put"
@@ -1032,9 +1113,13 @@ def build_long_straddles(df, min_dte, max_dte, min_width, max_width,
 
         legs = [
             {"type": "call", "strike": K, "qty": +1,
-             "entry_mid": float(r["mid_c"]), "iv": iv_c},
+             "entry_mid": float(r["mid_c"]), "iv": iv_c,
+             "native_delta": _ng(r, "delta_c"), "native_gamma": _ng(r, "gamma_c"),
+             "native_theta": _ng(r, "theta_c"), "native_vega":  _ng(r, "vega_c")},
             {"type": "put",  "strike": K, "qty": +1,
-             "entry_mid": float(r["mid_p"]), "iv": iv_p},
+             "entry_mid": float(r["mid_p"]), "iv": iv_p,
+             "native_delta": _ng(r, "delta_p"), "native_gamma": _ng(r, "gamma_p"),
+             "native_theta": _ng(r, "theta_p"), "native_vega":  _ng(r, "vega_p")},
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -1106,9 +1191,13 @@ def build_long_strangles(df, min_dte, max_dte, min_width, max_width,
 
         legs = [
             {"type": "call", "strike": K_c, "qty": +1,
-             "entry_mid": float(r["mid_c"]), "iv": iv_c},
+             "entry_mid": float(r["mid_c"]), "iv": iv_c,
+             "native_delta": _ng(r, "delta_c"), "native_gamma": _ng(r, "gamma_c"),
+             "native_theta": _ng(r, "theta_c"), "native_vega":  _ng(r, "vega_c")},
             {"type": "put",  "strike": K_p, "qty": +1,
-             "entry_mid": float(r["mid_p"]), "iv": iv_p},
+             "entry_mid": float(r["mid_p"]), "iv": iv_p,
+             "native_delta": _ng(r, "delta_p"), "native_gamma": _ng(r, "gamma_p"),
+             "native_theta": _ng(r, "theta_p"), "native_vega":  _ng(r, "vega_p")},
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -1182,9 +1271,13 @@ def build_risk_reversals(df, min_dte, max_dte, min_width, max_width,
 
         legs = [
             {"type": "call", "strike": K_c, "qty": +1,
-             "entry_mid": float(r["mid_c"]), "iv": iv_c},
+             "entry_mid": float(r["mid_c"]), "iv": iv_c,
+             "native_delta": _ng(r, "delta_c"), "native_gamma": _ng(r, "gamma_c"),
+             "native_theta": _ng(r, "theta_c"), "native_vega":  _ng(r, "vega_c")},
             {"type": "put",  "strike": K_p, "qty": -1,
-             "entry_mid": float(r["mid_p"]), "iv": iv_p},
+             "entry_mid": float(r["mid_p"]), "iv": iv_p,
+             "native_delta": _ng(r, "delta_p"), "native_gamma": _ng(r, "gamma_p"),
+             "native_theta": _ng(r, "theta_p"), "native_vega":  _ng(r, "vega_p")},
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({

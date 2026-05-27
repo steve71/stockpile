@@ -163,3 +163,26 @@ def fetch_history(ticker: str, start: str | None = None, end: str | None = None)
     if df.empty:
         return pd.DataFrame(columns=["Close"])
     return df[["Close"]].copy()
+
+
+def realized_vol(ticker: str, window: int = 20, lookback_days: int = 45) -> float:
+    """Annualized realized volatility from daily log returns.
+
+    Standard deviation of the trailing `window` daily log returns,
+    annualized by √252. Returns NaN when history is unavailable.
+    Provider-agnostic — always uses Yahoo daily closes.
+    """
+    import numpy as np
+    from datetime import date, timedelta
+
+    try:
+        start = (date.today() - timedelta(days=lookback_days)).isoformat()
+        hist = fetch_history(ticker, start=start)
+        if hist is None or hist.empty:
+            return float("nan")
+        log_ret = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+        if len(log_ret) < window:
+            return float("nan")
+        return float(log_ret.tail(window).std() * sqrt(252))
+    except Exception:
+        return float("nan")

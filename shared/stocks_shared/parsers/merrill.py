@@ -91,6 +91,12 @@ def _map_action(desc, signed_qty):
         return "Expired"
     if desc.startswith("Option Assigned"):
         return "Assigned"
+    # Pending transactions use "Buy CALL/PUT ..." and "Sell CALL/PUT ..." instead
+    # of "Option Purchase ..." / "Option Sale ..." before settlement clears.
+    if desc.startswith("Buy ") and ("CALL" in desc or "PUT" in desc):
+        return "Buy to Close" if signed_qty >= 0 else "Buy to Open"
+    if desc.startswith("Sell ") and ("CALL" in desc or "PUT" in desc):
+        return "Sell to Open" if signed_qty <= 0 else "Sell to Close"
     if desc.startswith("Purchase"):
         return "Buy"
     if desc.startswith("Sale"):      # covers "Sale" and "Sale-Option Assigned"

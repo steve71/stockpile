@@ -3,11 +3,12 @@
 # Copy this file to config.toml and fill in your credentials.
 # config.toml is gitignored — never commit credentials.
 #
-# Data source: "yahoo" (default, no setup) or "schwab" (real-time).
-# See SCHWAB_DATA_SOURCE.md for setup instructions.
+# Data source: "yahoo" (default, no setup), "schwab" (real-time), or "moomoo" (real-time).
+# See SCHWAB_DATA_SOURCE.md for Schwab setup instructions.
+# For Moomoo: install OpenD from https://www.moomoo.com/download/openD and run it locally.
 
 [data_source]
-provider = "yahoo"  # default in dropdown, "yahoo" or "schwab"
+provider = "yahoo"  # default in dropdown, "yahoo", "schwab", or "moomoo"
 
 # ── Schwab credentials ──────────────────────────────────────────────────────
 # Required only when provider = "schwab".
@@ -19,3 +20,14 @@ app_key      = "your-app-key-from-developer.schwab.com"
 app_secret   = "your-app-secret"
 callback_url = "https://127.0.0.1:8182/"
 token_file   = "~/.config/schwab-token.json"
+
+# ── Moomoo / OpenD credentials ───────────────────────────────────────────────
+# Required only when provider = "moomoo".
+# OpenD (Moomoo's local gateway) must be running before scanning.
+# Download OpenD: https://www.moomoo.com/download/openD
+# The default host/port work when OpenD runs on the same machine.
+# A US Level 2 market data subscription is required for live options Greeks.
+
+[moomoo]
+host = "127.0.0.1"
+port = 11111

@@ -48,8 +48,8 @@ def render_portfolio_action_card(
     Uncovered (just stock) → SELL TO OPEN: write covered calls. Number
     of contracts is auto-sized to the user's share count (shares // 100).
     """
-    # Pick the same #1 row the ranked table picks: IV-rich (descending
-    # iv_excess) with open_interest tie-break.
+    # Pick the same #1 row the ranked table picks: highest-ranked
+    # (descending signal_score) with open_interest tie-break.
     eligible = df_filt[
         (df_filt["type"] == "call")
         & (df_filt["open_interest"] >= min_oi)
@@ -57,8 +57,9 @@ def render_portfolio_action_card(
     ]
     if eligible.empty:
         return
+    sort_col = "signal_score" if "signal_score" in eligible.columns else "iv_excess"
     pick = (
-        eligible.sort_values(["iv_excess", "open_interest"],
+        eligible.sort_values([sort_col, "open_interest"],
                              ascending=[False, False])
         .iloc[0]
     )

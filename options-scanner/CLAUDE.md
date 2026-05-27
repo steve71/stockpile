@@ -20,12 +20,25 @@ vernacular and remain fine.
 ## How it works
 
 1. Fetch all expirations with DTE >= min_dte from Yahoo Finance
-2. Build a 2-D IV surface: IV ≈ f(log-moneyness, √T)
-3. Compute IV excess = actual IV − fitted IV (positive = IV-rich,
+2. Annotate earnings events within each expiration window (elevated IV
+   around earnings is expected, not a signal)
+3. Fit an IV surface and score each option, via a three-stage
+   **pluggable pipeline** (defaults reproduce the original behavior):
+   - **Filter** (`iv_filters.py`) — which options feed the regression
+   - **Algorithm** (`iv_algorithms.py`) — `global_poly` (default) or
+     `per_expiration`; produces `iv_fitted`
+   - **Score** (`iv_scores.py`) — the ranking key `signal_score`;
+     defaults to `raw_pp` (= IV excess), with z-score, relative,
+     execution-cost composite, VRP, and historical-percentile options
+4. Compute IV excess = actual IV − fitted IV (positive = IV-rich,
    sits above the fitted surface)
-4. Annotate each option with earnings events within its expiration
-   window (elevated IV around earnings is expected, not a signal)
 5. Display ranked table including delta, annualized yield, and OI
+
+The Single Ticker tab exposes a **Current vs. Surface v2 / LGbengs**
+preset toggle plus an Advanced expander to mix the three stages; the
+CLI mirrors this via `--preset` / `--algorithm` / `--score`. The
+`percentile` score persists scans to a gitignored SQLite store
+(`options-scanner/cache/`) and is blank until history accumulates.
 
 ## Running the tool
 
@@ -64,6 +77,7 @@ Run `uv sync` from repo root after any `pyproject.toml` change.
 | Bid/Ask/Mid | Market prices                                 |
 | IV%     | Implied volatility (annualized %)                  |
 | IV+pp   | IV excess above surface fit (positive = rich)      |
+| _score_ | Active-score column (z-score, VRP, etc.) shown next to IV+pp when a non-default score drives ranking; header is the score's label |
 | Delta   | Black-Scholes delta (call: 0–1, put: −1–0)         |
 | Ann%    | Annualized yield: calls vs. spot, puts vs. strike  |
 | OI      | Open interest                                      |

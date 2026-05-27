@@ -22,6 +22,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from options_scanner import iv_scores
 from options_scanner.ui_theme import empty_state
 
 from options_scanner.display.chain_styling import (
@@ -71,6 +72,12 @@ def show_chain_table(df_exp: pd.DataFrame, buy: bool, mode: str,
         "Mid":    df_s["mid"].round(2),
         "IV%":    (df_s["iv"] * 100).round(1),
         "IV+pp":  (df_s["iv_excess"] * 100).round(1),
+    })
+    kind = iv_scores.active_kind(df_s)
+    if kind != "IV+pp":
+        mult, _ = iv_scores.display_for(kind)
+        cols[kind] = (df_s["signal_score"] * mult).round(2)
+    cols.update({
         "Delta":  df_s["delta"].round(2),
         "Ann%":   df_s["ann_yield_pct"].round(1),
         "OI":     df_s["open_interest"],
@@ -158,6 +165,11 @@ def show_chain_table(df_exp: pd.DataFrame, buy: bool, mode: str,
                                                width=65,
                                                help=vol_help_for(min_vol)),
     }
+    if kind != "IV+pp":
+        _, fmt = iv_scores.display_for(kind)
+        col_cfg[kind] = st.column_config.NumberColumn(
+            kind, format=fmt, width=85,
+            help="Active ranking score driving the Top column.")
     if roll_close_cost is not None:
         col_cfg["NetCr"] = st.column_config.NumberColumn("Net Credit",
                                                          format="$%+.2f",

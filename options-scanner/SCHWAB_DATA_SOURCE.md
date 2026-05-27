@@ -30,6 +30,7 @@ Register at [developer.schwab.com](https://developer.schwab.com).
 
 Create an app and note your **App Key** and **App Secret**.
 Set the callback URL to `https://127.0.0.1:8182/`.
+** MAKE SURE TO INCLUDE THE ENDING / to the above URL!!
 - simple, just filling in some descriptive fields.
 - after creating this app it also took a few hours before app
   was ready to use.

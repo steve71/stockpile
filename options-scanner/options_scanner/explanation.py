@@ -32,8 +32,9 @@ def generate_explanation(
         "both": "calls and puts",
     }.get(mode, "options")
 
+    sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
     top = df.sort_values(
-        ["iv_excess", "open_interest"], ascending=[False, False]
+        [sort_col, "open_interest"], ascending=[False, False]
     ).head(10)
 
     rows_lines = []

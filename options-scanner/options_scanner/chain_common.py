@@ -57,6 +57,8 @@ def build_option_row(
     gamma: float,
     open_interest: int,
     volume: int,
+    theta: float = 0.0,
+    vega: float = 0.0,
 ) -> dict | None:
     """Apply quote-quality filters and assemble a canonical chain row.
 
@@ -70,9 +72,10 @@ def build_option_row(
     sides are positive, otherwise to `last`. Pass mid=0 if the
     provider doesn't supply one directly.
 
-    Returned dict matches the 17-column scanner schema. `iv_fitted`
-    starts equal to `iv` and `iv_excess` starts at 0; both are
-    overwritten by `iv_surface.compute_iv_excess` downstream.
+    Returned dict matches the canonical scanner schema. `iv_fitted`
+    starts equal to `iv`, `iv_excess`/`signal_score` start at 0, and
+    `hv_20`/`vr_ratio` start as NaN; all are overwritten downstream by
+    `iv_surface.compute_iv_excess` and `fetch._enrich`.
     """
     if bid <= 0 and ask <= 0:
         return None
@@ -101,10 +104,16 @@ def build_option_row(
         "iv":             iv,
         "iv_fitted":      iv,
         "iv_excess":      0.0,
+        "signal_score":   0.0,
+        "signal_kind":    "IV+pp",
         "delta":          delta,
         "gamma":          gamma,
+        "theta":          theta,
+        "vega":           vega,
         "ann_yield_pct":  ann_yield,
         "open_interest":  open_interest,
         "volume":         volume,
         "earnings_count": 0,
+        "hv_20":          float("nan"),
+        "vr_ratio":       float("nan"),
     }
