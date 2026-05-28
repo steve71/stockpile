@@ -176,6 +176,14 @@ def _scan_one(ticker: str, args, opt_type_fetch: str, mode: str,
         )
         return None
 
+    if args.min_strike is not None:
+        df = df[df["strike"] >= args.min_strike]
+    if args.max_strike is not None:
+        df = df[df["strike"] <= args.max_strike]
+    if df.empty:
+        log.error("No options remaining for %s after strike filter.", ticker)
+        return None
+
     if args.min_ivpp is not None:
         if args.buy:
             df = df[df["iv_excess"] * 100 <= -args.min_ivpp]
@@ -222,11 +230,23 @@ def _scan_one(ticker: str, args, opt_type_fetch: str, mode: str,
                 roll_close_cost = (bid + ask) / 2 if bid > 0 and ask > 0 else last
                 log.info("  Close cost (mid): $%.2f", roll_close_cost)
             else:
-                log.warning("  Could not find current position in chain.")
+                log.warning("  Could not find current position in chain — assuming $0.00 close cost (deep OTM / worthless).")
+                roll_close_cost = 0.0
         else:
             log.warning("  Could not fetch chain for %s.", args.roll_expiration)
 
     return df, spot, earnings_dates, roll_close_cost
+
+
+def _html_path(ticker: str, mode: str, args) -> Path:
+    """Build the output path for an HTML report."""
+    action_tag = "buy" if args.buy else "sell"
+    type_tag = mode if mode != "both" else "both"
+    filename = (f"{ticker}_{type_tag}_{action_tag}"
+                f"_{date.today().strftime('%Y%m%d')}.html")
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else Path(__file__).parents[1] / "output")
+    return output_dir / filename
 
 
 def main() -> None:
@@ -280,8 +300,8 @@ def main() -> None:
         help="Minimum today's volume filter (default: 10)",
     )
     parser.add_argument(
-        "--top", type=int, default=10,
-        help="Max rows per option type in terminal or JSON (default: 10)",
+        "--top", type=int, default=4,
+        help="Max rows per option type in terminal or JSON (default: 4)",
     )
     parser.add_argument(
         "--min-delta", type=float, default=0.10, metavar="D",
@@ -292,13 +312,26 @@ def main() -> None:
         help="Exclude options where abs(delta) > D (default: 0.75)",
     )
     parser.add_argument(
+        "--min-strike", type=float, default=None, metavar="X",
+        help="Exclude options with strike below X",
+    )
+    parser.add_argument(
+        "--max-strike", type=float, default=None, metavar="X",
+        help="Exclude options with strike above X",
+    )
+    parser.add_argument(
         "--min-ivpp", type=float, default=None, metavar="N",
         help="Only show options where IV+pp >= N pp above the surface "
              "(sell mode) or >= N pp below (buy mode)",
     )
     parser.add_argument(
         "--html", action="store_true",
-        help="Also save an HTML report to --output-dir",
+        help="Save an HTML report to --output-dir (works with --agent too)",
+    )
+    parser.add_argument(
+        "--browser", action="store_true",
+        help="Open the HTML report in the default browser after saving "
+             "(implies --html)",
     )
     parser.add_argument(
         "--output-dir", default=None, metavar="DIR",
@@ -357,6 +390,8 @@ def main() -> None:
     if args.agent:
         args.as_json = True
         args.quiet = True
+    if args.browser:
+        args.html = True
 
     # Resolve the pluggable surface-fit configs from preset + overrides.
     _presets = {
@@ -403,6 +438,26 @@ def main() -> None:
 
     from options_scanner.display.cli import print_results
 
+    scan_params = {
+        "data_source": provider,
+        "preset": args.preset,
+        "algorithm": args.algo_config[0],
+        "score": args.score_config[0],
+        "min_dte": args.min_dte,
+        "max_dte": args.max_dte,
+        "min_delta": args.min_delta,
+        "max_delta": args.max_delta,
+        "min_oi": args.min_oi,
+        "min_vol": args.min_vol,
+        "top": args.top,
+        "min_strike": args.min_strike,
+        "max_strike": args.max_strike,
+        "roll": args.roll,
+        "roll_type": args.roll_type if args.roll else None,
+        "roll_strike": args.roll_strike if args.roll else None,
+        "roll_expiration": args.roll_expiration if args.roll else None,
+    }
+
     json_results = []
     any_success = False
 
@@ -417,9 +472,24 @@ def main() -> None:
         any_success = True
 
         if args.as_json:
-            json_results.append(
-                _build_json_result(ticker, spot, df, mode, provider, args, roll_close_cost)
+            json_result = _build_json_result(
+                ticker, spot, df, mode, provider, args, roll_close_cost
             )
+            if args.html:
+                from options_scanner.report import save_html
+                html_path = _html_path(ticker, mode, args)
+                save_html(
+                    df, ticker, spot, earnings_dates, mode,
+                    buy=args.buy, roll_close_cost=roll_close_cost,
+                    min_oi=args.min_oi, min_vol=args.min_vol,
+                    output_path=html_path, scan_params=scan_params,
+                    top_n=args.top,
+                )
+                json_result["html_report"] = str(html_path)
+                if args.browser:
+                    import webbrowser
+                    webbrowser.open(html_path.as_uri())
+            json_results.append(json_result)
         else:
             print_results(
                 df, ticker, spot, earnings_dates, mode,
@@ -432,23 +502,18 @@ def main() -> None:
             )
             if args.html:
                 from options_scanner.report import save_html
-                action_tag = "buy" if args.buy else "sell"
-                type_tag = mode if mode != "both" else "both"
-                filename = (
-                    f"{ticker}_{type_tag}_{action_tag}"
-                    f"_{date.today().strftime('%Y%m%d')}.html"
-                )
-                output_dir = (
-                    Path(args.output_dir) if args.output_dir
-                    else Path(__file__).parents[1] / "output"
-                )
-                output_path = output_dir / filename
+                html_path = _html_path(ticker, mode, args)
                 save_html(
                     df, ticker, spot, earnings_dates, mode,
                     buy=args.buy, roll_close_cost=roll_close_cost,
-                    min_oi=args.min_oi, output_path=output_path,
+                    min_oi=args.min_oi, min_vol=args.min_vol,
+                    output_path=html_path, scan_params=scan_params,
+                    top_n=args.top,
                 )
-                print(f"  HTML report: {output_path}")
+                print(f"  HTML report: {html_path}")
+                if args.browser:
+                    import webbrowser
+                    webbrowser.open(html_path.as_uri())
 
     if args.as_json:
         output = json_results[0] if len(tickers) == 1 else json_results

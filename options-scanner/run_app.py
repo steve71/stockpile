@@ -134,9 +134,8 @@ button[data-testid="stBaseButton-primary"]:hover {{
 # width and writes data-sidebar-open onto body so the header-bar CSS
 # above can respond. Identical to the previous implementation — Streamlit
 # offers no native hook for this.
-import streamlit.components.v1 as _components
-_components.html(
-    """
+st.iframe(
+    r"""
     <script>
     (function() {
         const doc = window.parent.document;
@@ -177,7 +176,7 @@ _components.html(
     })();
     </script>
     """,
-    height=0, width=0,
+    height=1, width=1,
 )
 
 

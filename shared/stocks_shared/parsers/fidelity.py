@@ -99,7 +99,7 @@ def _parse_rows_to_transactions(rows):
                 continue
             ticker, expiration, strike, opt_type, schwab_symbol = parsed
             qty_raw = qty_s.replace(",", "")
-            qty = abs(int(float(qty_raw))) if qty_raw and re.search(r"\d", qty_raw) else ""
+            qty = abs(float(qty_raw)) if qty_raw and re.search(r"\d", qty_raw) else ""
             transactions.append([
                 date_str, action, opt_type, schwab_symbol,
                 strike, expiration, qty,
@@ -112,7 +112,7 @@ def _parse_rows_to_transactions(rows):
 
         # Stock buy/sell
         qty_raw = qty_s.replace(",", "")
-        qty = abs(int(float(qty_raw))) if qty_raw and re.search(r"\d", qty_raw) else ""
+        qty = abs(float(qty_raw)) if qty_raw and re.search(r"\d", qty_raw) else ""
         transactions.append([
             date_str, action, "Stock", symbol,
             "", "", qty,

@@ -292,7 +292,7 @@ def tab_portfolio() -> None:
         pos    = res["position"]
         ticker = pos["ticker"]
         covered = bool(pos["open_calls"])
-        label  = f"{ticker} — {pos['shares']} shares — {'Covered' if covered else 'Uncovered'}"
+        label  = f"{ticker} — {pos['shares']:g} shares — {'Covered' if covered else 'Uncovered'}"
 
         with st.expander(label, expanded=True):
             if res["error"]:
@@ -324,7 +324,7 @@ def tab_portfolio() -> None:
                             spot_value_html(spot, _meta["pct_change"]),
                             help_text=spot_help_text(_meta))
             with m2:
-                metric_card("SHARES", f"{pos['shares']:,}",
+                metric_card("SHARES", f"{pos['shares']:,g}",
                             help_text="Covered" if covered else "Uncovered")
             with m3:
                 metric_card("EXPIRATIONS", f"{df['expiration'].nunique()}")

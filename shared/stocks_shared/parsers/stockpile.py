@@ -40,12 +40,12 @@ def _parse_float(s: str) -> float | None:
         return None
 
 
-def _parse_qty(s: str) -> int | None:
+def _parse_qty(s: str) -> float | None:
     s = s.strip()
     if not s:
         return None
     try:
-        return abs(int(float(s)))
+        return abs(float(s))
     except ValueError:
         return None
 

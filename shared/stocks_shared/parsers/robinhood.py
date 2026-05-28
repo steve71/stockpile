@@ -68,7 +68,7 @@ def _parse_qty(raw):
     """Parse quantity, stripping S suffix (short-position marker in ACATI rows)."""
     if not raw or not re.search(r"\d", raw):
         return ""
-    return abs(int(float(re.sub(r"[^\d.]", "", raw))))
+    return abs(float(re.sub(r"[^\d.]", "", raw)))
 
 
 def _build_opt_symbol(ticker, expiration, strike, opt_type):

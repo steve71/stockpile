@@ -1,5 +1,6 @@
 """Schwab CSV parser."""
 
+import math
 import re
 import csv
 from collections import defaultdict
@@ -52,8 +53,8 @@ def _parse_rows_to_transactions(rows):
         # Record as "Transfer In" so compute_status can flag the position as
         # Inconsistent until the original buy transactions are located.
         if action == "Internal Transfer":
-            qty = abs(int(float(qty_s.replace(",", "")))) if qty_s and re.search(r"\d", qty_s) else ""
-            if qty == "" or qty <= 0:
+            qty = abs(float(qty_s.replace(",", ""))) if qty_s and re.search(r"\d", qty_s) else ""
+            if qty == "" or not math.isfinite(qty) or qty <= 0:
                 continue
             transactions.append([
                 date_str, "Transfer In", "Stock", symbol,
@@ -77,7 +78,8 @@ def _parse_rows_to_transactions(rows):
             strike = ""
             opt_type = "Stock"
 
-        qty = abs(int(float(qty_s.replace(",", "")))) if qty_s and re.search(r"\d", qty_s) else ""
+        qty_raw = abs(float(qty_s.replace(",", ""))) if qty_s and re.search(r"\d", qty_s) else ""
+        qty = qty_raw if qty_raw == "" or math.isfinite(qty_raw) else ""
         price = parse_dollar(price_s)
         fees = parse_dollar(fees_s)
         amount = parse_dollar(amount_s)

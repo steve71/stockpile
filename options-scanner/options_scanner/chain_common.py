@@ -101,6 +101,7 @@ def build_option_row(
         "bid":            bid,
         "ask":            ask,
         "mid":            mid,
+        "last":           last,
         "iv":             iv,
         "iv_fitted":      iv,
         "iv_excess":      0.0,
