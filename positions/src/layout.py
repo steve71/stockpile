@@ -339,11 +339,15 @@ def build_open_sections(ticker, open_positions, last_row, avg_held_anchor=None,
             ["Amount Invested",
              f"=-SUMPRODUCT((C${T}:C${L}=\"Stock\")*(B${T}:B${L}=\"Buy\")*J${T}:J${L})"],
             ["Close-out Value", "=E7+B7+B8"],
-            ["Total Income", f"=E{i+5}-E{i+1}"],
+            ["Total Income", "=" + "+".join(
+                (["B13"] if show_calls else []) +
+                ([f"B{p+3}"] if show_puts else []) +
+                [f"B{i+1}"]
+            )],
             ["Ann Yield on Invested Capital",
-             f"=IFERROR(E{i+5}/E6*(365/H7),0)"],
+             f"=IFERROR(H{i+3}/H{i+1}*(365/H7),0)"],
             ["Ann Yield on Close-out Value",
-             f"=IFERROR(E{i+5}/H{i+2}*(365/H7),0)"],
+             f"=IFERROR(H{i+3}/H{i+2}*(365/H7),0)"],
         ],
 
         f"A{txn_row-2}:K{txn_row-1}": [
@@ -413,11 +417,15 @@ def build_closed_sections(ticker, open_positions, last_row,
              f"=-SUMPRODUCT((C${T}:C${L}=\"Stock\")*(B${T}:B${L}=\"Buy\")*J${T}:J${L})"],
             ["Close-out Value",
              f"=SUMPRODUCT((C${T}:C${L}=\"Stock\")*(B${T}:B${L}=\"Sell\")*J${T}:J${L})"],
-            ["Total Income", f"=E{i+5}-E{i+1}"],
+            ["Total Income", "=" + "+".join(
+                (["B13"] if show_calls else []) +
+                ([f"B{p+3}"] if show_puts else []) +
+                [f"B{i+1}"]
+            )],
             ["Ann Yield on Invested Capital",
-             f"=IFERROR(E{i+5}/H{i+1}*(365/H7),0)"],
+             f"=IFERROR(H{i+3}/H{i+1}*(365/H7),0)"],
             ["Ann Yield on Close-out Value",
-             f"=IFERROR(E{i+5}/H{i+2}*(365/H7),0)"],
+             f"=IFERROR(H{i+3}/H{i+2}*(365/H7),0)"],
         ],
 
         f"A{txn_row-2}:K{txn_row-1}": [

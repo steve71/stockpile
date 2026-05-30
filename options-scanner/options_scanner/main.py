@@ -240,10 +240,26 @@ def _scan_one(ticker: str, args, opt_type_fetch: str, mode: str,
 
 def _html_path(ticker: str, mode: str, args) -> Path:
     """Build the output path for an HTML report."""
-    action_tag = "buy" if args.buy else "sell"
+    action_tag = "roll" if args.roll else ("buy" if args.buy else "sell")
     type_tag = mode if mode != "both" else "both"
-    filename = (f"{ticker}_{type_tag}_{action_tag}"
-                f"_{date.today().strftime('%Y%m%d')}.html")
+    parts = [ticker, type_tag, action_tag]
+
+    if args.roll and args.roll_strike is not None:
+        parts.append(f"k{args.roll_strike:g}")
+
+    if args.min_dte != 30 or args.max_dte != 90:
+        parts.append(f"dte{args.min_dte}-{args.max_dte}")
+
+    if args.min_strike is not None or args.max_strike is not None:
+        lo = f"{args.min_strike:g}" if args.min_strike is not None else ""
+        hi = f"{args.max_strike:g}" if args.max_strike is not None else ""
+        parts.append(f"s{lo}-{hi}" if lo and hi else f"smin{lo}" if lo else f"smax{hi}")
+
+    if args.top != 4:
+        parts.append(f"top{args.top}")
+
+    parts.append(date.today().strftime('%Y%m%d'))
+    filename = "_".join(parts) + ".html"
     output_dir = (Path(args.output_dir) if args.output_dir
                   else Path(__file__).parents[1] / "output")
     return output_dir / filename

@@ -45,10 +45,25 @@ def test_global_poly_recovers_quadratic_exactly():
     assert np.abs(df["iv"].to_numpy() - fitted).max() < 1e-8
 
 
-def test_global_poly_returns_none_below_five_rows():
+def test_global_poly_requires_residual_dof():
+    """global_poly needs > params rows so the fit is a genuine regression,
+    not an exact interpolant. The 6-term model has 6 params; with only 6
+    rows there are 0 residual DOF, so it falls back rather than report a
+    fake-perfect (residual ≡ 0) surface. With 8 rows (2 residual DOF) it
+    fits."""
     spot = 100.0
-    df = _chain(spot, [(30, "A")], [95, 100, 105], lambda K, t: 0.30)
-    assert iv_algorithms.fit(df, _all(df), ("global_poly", frozenset())) is None
+    three = _chain(spot, [(30, "A")], [95, 100, 105], lambda K, t: 0.30)
+    assert iv_algorithms.fit(three, _all(three),
+                             ("global_poly", frozenset())) is None
+    six = _chain(spot, [(30, "A")], [80, 90, 100, 110, 120, 130],
+                 lambda K, t: 0.30)
+    assert iv_algorithms.fit(six, _all(six),
+                             ("global_poly", frozenset())) is None
+    eight = _chain(spot, [(30, "A")],
+                   [70, 80, 90, 100, 110, 120, 130, 140], lambda K, t: 0.30)
+    fitted = iv_algorithms.fit(eight, _all(eight),
+                               ("global_poly", frozenset()))
+    assert fitted is not None and len(fitted) == len(eight)
 
 
 def test_per_expiration_recovers_distinct_slice_curves():
@@ -64,11 +79,17 @@ def test_per_expiration_recovers_distinct_slice_curves():
 
 
 def test_per_expiration_beats_global_on_divergent_slices():
+    # global_poly's m²·√T term makes curvature affine in √T, so it can fit
+    # any TWO slices' curvatures exactly. To show per-expiration still wins,
+    # use THREE slices whose curvature is non-monotonic in √T (0.80 → 0.15
+    # → 0.70) — no line in √T passes through all three, so the global
+    # surface must compromise while per-expiration fits each slice's own.
     spot = 100.0
+    curv = {30: 0.80, 60: 0.15, 90: 0.70}
     def iv_fn(K, t):
         m = math.log(K / spot)
-        return (0.20 + 0.80 * m ** 2) if t == 30 else (0.45 - 0.30 * m)
-    df = _chain(spot, [(30, "A"), (60, "B")],
+        return 0.30 + curv[t] * m ** 2
+    df = _chain(spot, [(30, "A"), (60, "B"), (90, "C")],
                 [80, 85, 90, 95, 100, 105, 110, 115, 120], iv_fn)
     per = iv_algorithms.fit(df, _all(df), ("per_expiration", frozenset()))
     glob = iv_algorithms.fit(df, _all(df), ("global_poly", frozenset()))

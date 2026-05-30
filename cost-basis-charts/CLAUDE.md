@@ -15,7 +15,8 @@ viewer can see how their adjusted cost basis compares to the stock price at each
 
 ## Data sources
 
-- Brokerage CSV exports (reuse parsers from `../positions/src/parsers/`)
+- Brokerage CSV exports (parsers from the `stocks-shared` package:
+  `shared/stocks_shared/parsers/`)
 - Yahoo Finance historical prices via `yfinance` (`Ticker.history()`)
 
 ## Chart ideas

@@ -34,9 +34,11 @@ vernacular and remain fine.
    sits above the fitted surface)
 5. Display ranked table including delta, annualized yield, and OI
 
-The Single Ticker tab exposes a **Current vs. Surface v2 / LGbengs**
-preset toggle plus an Advanced expander to mix the three stages; the
-CLI mirrors this via `--preset` / `--algorithm` / `--score`. The
+The Single Ticker tab exposes a **Global / Per-expiry** preset toggle
+(the "Fit:" radio) plus an **Advanced surface fit** expander to mix the
+three stages; the CLI mirrors this via `--preset {current,v2}` /
+`--algorithm` / `--score` (the CLI preset names differ from the UI
+labels). The
 `percentile` score persists scans to a gitignored SQLite store
 (`options-scanner/cache/`) and is blank until history accumulates.
 

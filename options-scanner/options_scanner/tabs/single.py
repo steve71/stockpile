@@ -27,6 +27,7 @@ from options_scanner.display.gex_chart import show_gex_chart
 from options_scanner.display.iv_chart import show_iv_chart
 from options_scanner.display.outlook_card import render_outlook_card
 from options_scanner.display.scan_results import show_scan_results
+from options_scanner.display.surface_diagnostics import show_surface_diagnostics
 from options_scanner.display.spot_meta import (
     fetch_spot_meta,
     spot_help_text,
@@ -282,7 +283,7 @@ def tab_single() -> None:
                 )
                 _dcols = st.columns(2)
                 sf_delta_lo = _dcols[0].number_input(
-                    "Min |Δ|", value=0.05, min_value=0.0, max_value=0.49,
+                    "Min |Δ|", value=0.10, min_value=0.0, max_value=0.49,
                     step=0.01, format="%.2f", key="s_sf_delta_lo",
                     disabled=not sf_use_delta,
                 )
@@ -476,6 +477,7 @@ def tab_single() -> None:
             "roll_strike": roll_strike if rolling else None,
             "roll_type": roll_type_sel if rolling else None,
             "surface_filters": surface_filter_config,
+            "algo_config": algo_config,
         }
 
         # Persist the scan parameters for the Recent Scans dropdown.
@@ -523,13 +525,19 @@ def tab_single() -> None:
         return
 
     ticker_r  = res["ticker"]
-    df_r      = res["df"]
     mode_r    = res["mode"]
     buy_r     = res["buy"]
     rcc       = res["roll_close_cost"]
+    # res["df"] is the full two-sided chain the surface was fit on (both
+    # wings anchor the fit). Display/scoring (df_r → df_filt) uses only the
+    # requested side; the diagnostics, GEX, and chart df_full get the full
+    # fit set so they report what actually anchored the surface.
+    df_fit_full = res["df"]
+    df_r = (df_fit_full[df_fit_full["type"] == mode_r].reset_index(drop=True)
+            if mode_r in ("call", "put") else df_fit_full)
     df_filt   = df_r[df_r["delta"].abs().between(
                     res["delta_min"], res["delta_max"])].copy()
-    spot      = float(df_r["spot"].iloc[0])
+    spot      = float(df_fit_full["spot"].iloc[0])
 
     st.markdown(
         "<div style='margin-top:0.4rem;'></div>", unsafe_allow_html=True,
@@ -611,9 +619,13 @@ def tab_single() -> None:
                    min_vol=res.get("min_vol", 0),
                    provider=st.session_state.get("scan_provider", "yahoo"),
                    earnings_dates=res.get("earnings_dates"),
-                   surface_filters=res.get("surface_filters"))
+                   surface_filters=res.get("surface_filters"),
+                   df_full=df_fit_full)
 
-    show_gex_chart(df_r, spot,
+    show_surface_diagnostics(df_fit_full, res.get("surface_filters"),
+                             res.get("algo_config"))
+
+    show_gex_chart(df_fit_full, spot,
                     provider=st.session_state.get("scan_provider", "yahoo"),
                     ticker=ticker_r)
 

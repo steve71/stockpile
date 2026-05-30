@@ -31,7 +31,17 @@ import pandas as pd
 # Hashable single-algorithm config: (name, frozenset({(kwarg, val), ...}))
 AlgorithmConfig = tuple[str, frozenset]
 
-_MIN_GLOBAL_ROWS = 5   # global_poly needs ≥5 points for the 5-term fit
+# global_poly fits a 6-term surface:
+#   IV ≈ a + b·m + c·m² + d·√T + e·m·√T + f·m²·√T
+# The f·m²·√T term lets the smile's CURVATURE vary with maturity (sharp
+# near-dated smiles, flat long-dated) instead of forcing one shared
+# curvature c across all expirations — a single c is a maturity-weighted
+# average that sits below the steeper near-dated wings. Require ≥2
+# residual degrees of freedom — params + 2 = 8 — so the fit is a genuine
+# regression, never an exact interpolant; below 8 we'd rather fall back
+# to the honest flat surface than report a fake-perfect fit.
+_GLOBAL_PARAMS = 6
+_MIN_GLOBAL_ROWS = _GLOBAL_PARAMS + 2   # = 8
 # per_expiration picks the highest polynomial degree that still leaves
 # ≥2 residual degrees of freedom, so a slice is FIT, never interpolated
 # (a degree-d polynomial passes exactly through d+1 points). Below the
@@ -74,7 +84,13 @@ def _wls(X: np.ndarray, y: np.ndarray, w: np.ndarray | None) -> np.ndarray:
 # ── Algorithms ──────────────────────────────────────────────────────────────────
 
 def _global_poly(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none"):
-    """One surface across the whole chain: IV ≈ a + b·m + c·m² + d·√T + e·m·√T.
+    """One surface across the whole chain:
+    IV ≈ a + b·m + c·m² + d·√T + e·m·√T + f·m²·√T.
+
+    The f·m²·√T term lets curvature vary with maturity; at a single
+    expiration the three √T columns collapse onto their non-√T twins
+    (1, m, m²), so the slice is still fit by a plain quadratic in m
+    (lstsq handles the rank deficiency, returning the same fitted values).
 
     Returns (iv_fitted, methods) — methods is a per-row array of fit-method
     labels — or (None, None) when there are too few points to fit.
@@ -86,7 +102,8 @@ def _global_poly(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none"):
     def design(frame: pd.DataFrame) -> np.ndarray:
         m = frame["log_moneyness"].to_numpy(dtype=float)
         sqrt_T = np.sqrt(frame["dte"].to_numpy(dtype=float) / 365.0)
-        return np.column_stack([np.ones_like(m), m, m ** 2, sqrt_T, m * sqrt_T])
+        return np.column_stack(
+            [np.ones_like(m), m, m ** 2, sqrt_T, m * sqrt_T, m ** 2 * sqrt_T])
 
     try:
         coeffs = _wls(design(fit), fit["iv"].to_numpy(dtype=float),

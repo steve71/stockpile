@@ -74,10 +74,23 @@ def fetch_and_enrich(ticker: str, opt_type: str, min_dte: int,
                      surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
                      algo_config: AlgorithmConfig = ALGO_DEFAULT,
                      score_config: ScoreConfig = SCORE_DEFAULT,
-                     moomoo_config: dict | None = None):
+                     moomoo_config: dict | None = None,
+                     fit_both_sides: bool = True):
+    """Fetch + enrich a chain. With fit_both_sides (the default), a
+    one-sided request ("calls"/"puts") still fetches BOTH sides so the IV
+    surface is anchored on both wings of the smile, and the full two-sided
+    chain is returned — the caller filters to the side it displays.
+
+    The IV surface is a property of the underlying, not of calls vs puts:
+    OTM puts trace the left wing, OTM calls the right. Fitting one wing
+    alone leaves curvature (and the m²·√T maturity term) badly under-
+    determined and prone to wild extrapolation, so the fit always sees both.
+    """
     from options_scanner.chain import fetch_chain
+    fetch_type = ("both" if (fit_both_sides and opt_type in ("calls", "puts"))
+                  else opt_type)
     try:
-        df = fetch_chain(ticker, opt_type=opt_type, min_dte=min_dte,
+        df = fetch_chain(ticker, opt_type=fetch_type, min_dte=min_dte,
                          max_dte=max_dte, provider=provider,
                          schwab_config=schwab_config,
                          moomoo_config=moomoo_config)
@@ -98,11 +111,17 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
                    surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
                    algo_config: AlgorithmConfig = ALGO_DEFAULT,
                    score_config: ScoreConfig = SCORE_DEFAULT,
-                   moomoo_config: dict | None = None):
-    """Cached per-ticker chain fetch for portfolio tab."""
+                   moomoo_config: dict | None = None,
+                   fit_both_sides: bool = True):
+    """Cached per-ticker chain fetch for portfolio tab. With fit_both_sides
+    (the default) the IV surface is anchored on both wings (calls + puts),
+    but only calls are returned — the covered-call roll flow the portfolio
+    tab expects. Two-sided fitting keeps the surface curvature stable; see
+    fetch_and_enrich."""
     from options_scanner.chain import fetch_chain
+    fetch_type = "both" if fit_both_sides else "calls"
     try:
-        df = fetch_chain(ticker, opt_type="calls", min_dte=min_dte,
+        df = fetch_chain(ticker, opt_type=fetch_type, min_dte=min_dte,
                          provider=provider, schwab_config=schwab_config,
                          moomoo_config=moomoo_config)
     except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
@@ -113,4 +132,6 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
         return df, [], None
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
                            score_config)
+    if fit_both_sides and not df.empty:
+        df = df[df["type"] == "call"].reset_index(drop=True)
     return df, earnings, None

@@ -20,6 +20,10 @@ config.toml
 input/**/*.pdf
 input/*.pdf
 
+# Brokerage CSV backups
+input/**/*.bak
+input/*.bak
+
 # Logs
 *.log
 

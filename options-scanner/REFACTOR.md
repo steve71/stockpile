@@ -7,7 +7,17 @@ end-to-end review of the codebase. Trigger for picking this up:
 The repo is in good shape overall — these are growth-pain refactors,
 not symptoms of underlying rot. Listed by leverage, highest first.
 
-## 1. Split `run_app.py` into a `tabs/` package
+## 1. Split `run_app.py` into a `tabs/` package ✅ DONE 2026-05-28
+
+Done — `run_app.py` is now a thin orchestrator (theme, sidebar,
+title-bar pills, `st.tabs` registration). The six tab functions live in
+`options_scanner/tabs/` (`single.py`, `gex.py`, `portfolio.py`, and
+`spreads.py`, which holds `tab_spreads` / `tab_directional` /
+`tab_neutral`); display helpers in `options_scanner/display/`; and the
+computation helpers in `options_scanner/compute/` (`top_ranks.py`,
+`gex_summary.py`) — matching the shape sketched below.
+
+The original write-up, for context:
 
 `run_app.py` is ~2,700 lines and carries:
 

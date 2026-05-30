@@ -1,20 +1,47 @@
-# CLAUDE.md
+# CLAUDE.md — positions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Claude Code instructions for the Google Sheets position tracker.
 
 ## Purpose
 
-This directory stores Schwab brokerage transaction exports for stock and options trading analysis.
+Turn a brokerage transaction CSV into a fully formatted Google Sheet —
+stock positions, covered calls, sold puts, dividends, a P&L breakdown,
+and a cross-position summary — with live prices from Yahoo Finance.
 
-## Data Format
+## Running the tool
 
-CSV files exported from Schwab with columns: `Date, Action, Symbol, Description, Quantity, Price, Fees & Comm, Amount`
+Always run from the **repo root** using `uv run`:
 
-- **Action** values include: `Buy`, `Sell`, `Buy to Open`, `Sell to Open`, `Buy to Close`, `Sell to Close`
-- **Symbol** for options follows the pattern: `TICKER MM/DD/YYYY STRIKE C/P` (e.g., `AMD 01/16/2026 150.00 C`)
-- **Amount** is negative for debits (purchases) and positive for credits (sales)
-- Fees are listed separately in `Fees & Comm`
+```bash
+uv run positions/run_tracker.py                       # all configured accounts
+uv run positions/run_tracker.py --brokerage schwab    # one brokerage only
+uv run positions/run_tracker.py --csv input/OTHER.csv # override the CSV path
+```
 
-## File Naming
+Reads `positions/config.toml` (per-account Google Sheet IDs + CSV
+paths). Supported brokerages: **Schwab, Robinhood, Fidelity, Merrill
+Edge** — set `brokerage` in config to match the export. CSV parsers
+come from the `stocks-shared` package (`shared/stocks_shared/parsers/`).
 
-Files are named `TICKER_YYYYMMDD.csv` where the date reflects the export date.
+## Credentials & auth
+
+Google Sheets OAuth client at `~/.config/google-sheets-oauth.json`
+(setup steps in `../google-sheets-setup/`). The first run opens a
+browser to authorize; subsequent runs are silent.
+
+## Behavior notes
+
+- The script deletes and recreates each ticker tab on every run; the
+  Summary tabs are preserved.
+- Multiple accounts run **serially**, not in parallel — the Google
+  Sheets API quota and Yahoo's rate limit are per-project / per-IP, so
+  serial avoids 429s. Prices and option chains are cached in memory
+  across accounts, so each ticker is fetched once per run.
+- Option market values use the Yahoo `(bid + ask) / 2` midpoint.
+
+## Brokerage CSV input
+
+Place exports in the repo-root `input/` directory (gitignored). Config
+CSV paths resolve relative to the repo root. For a hand-written manual
+format (when you lack a supported export), see
+[../docs/stockpile-format.md](../docs/stockpile-format.md).

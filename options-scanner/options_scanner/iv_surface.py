@@ -10,8 +10,10 @@ The defaults (global-polynomial fit + raw IV+pp score + OTM/spread/
 delta filters) reproduce the original behavior exactly, so nothing
 changes until the caller selects another algorithm or score.
 
-Surface model (default algorithm): IV ≈ a + b·m + c·m² + d·√T + e·m·√T
-where m = log(K/S) and T = DTE/365. Options sitting above the surface
+Surface model (default algorithm):
+IV ≈ a + b·m + c·m² + d·√T + e·m·√T + f·m²·√T
+where m = log(K/S) and T = DTE/365 (the f·m²·√T term lets curvature
+vary with maturity). Options sitting above the surface
 are IV-rich — candidates to sell; below, IV-cheap.
 
 Output is a screening heuristic, not a mispricing claim.
@@ -56,6 +58,9 @@ def compute_iv_excess(
     valid = df[(df["iv"] > 0.02) & (df["dte"] > 0)]
     fit_subset = _apply_filters(valid, surface_filters)
     fit_mask = df.index.isin(fit_subset.index)
+    # Expose fit membership so the chart/diagnostics can show which
+    # contracts actually anchored the regression.
+    df["in_fit"] = fit_mask
 
     # Stage 2 — fit the surface (None → flat fallback). `methods` labels
     # how each row was fit so the chart can warn on fallback expirations.

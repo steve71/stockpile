@@ -8,14 +8,13 @@ tracker, cost basis charts, and shared parsing/finance utilities.
 > no guarantee of accuracy, completeness, or fitness for any particular
 > purpose. All tools rely on third-party data sources (Yahoo Finance,
 > Schwab developer API, brokerage CSV exports, Google Sheets) whose
-> availability, accuracy,
-> and format can change
-> without notice; output quality is limited by what those sources
-> return. Nothing produced by any tool in this repository constitutes
-> financial advice. Investing and options trading involve substantial
-> risk of loss. Do your own research before making any financial
-> decision. The authors are not responsible for any trading losses or
-> other damages arising from use of this software.
+> availability, accuracy, and format can change without notice; output
+> quality is limited by what those sources return. Nothing produced by
+> any tool in this repository constitutes financial advice. Investing
+> and options trading involve substantial risk of loss. Do your own
+> research before making any financial decision. The authors are not
+> responsible for any trading losses or other damages arising from use
+> of this software.
 
 ## Videos
 
@@ -31,6 +30,8 @@ data.
 | [Charts Your Broker Doesn't Show You (Using Claude Code)](https://youtu.be/LqroeMNC7AU) | cost-basis-charts |
 | [Option Scanner by Claude (Python, GitHub)](https://youtu.be/0H7BGJ3rJoQ) | options-scanner |
 | [Find the Best Options with Schwab and Claude](https://youtu.be/-MsAMYX0kAM) | options-scanner — Schwab data source |
+| [Find the Best Covered Call — Options Scanner](https://youtu.be/WVGH-Hjbnjs?si=w6FqHtbGoJsx887d) | options-scanner — covered calls |
+| [I Asked Claude to Roll My Covered Call](https://youtu.be/qBNh6DIUSQQ?si=6M5g8Eu0mnODyb3g) | options-scanner — CLI agent |
 
 ### Related — Yahoo Finance CLI series
 
@@ -42,24 +43,20 @@ A companion series on building a Yahoo Finance CLI with Claude Code
 
 ## Projects
 
-- **shared** — pip-installable package (`stocks-shared`): CSV parsers
+- **[options-scanner](options-scanner/README.md)** — Rank options by
+  IV vs. a fitted surface to surface covered call, cash-secured put,
+  and roll candidates. Web UI, CLI, and portfolio scanner. Supports
+  Yahoo Finance, Schwab API, and Moomoo.
+- **[positions](positions/README.md)** — Google Sheets position
+  tracker fed from brokerage CSV exports.
+- **[cost-basis-charts](cost-basis-charts/README.md)** — Interactive
+  cost basis vs. price charts.
+- **[google-sheets-setup](google-sheets-setup/README.md)** — Google
+  Sheets API setup docs.
+- **shared** — pip-installable `stocks-shared` package: CSV parsers
   (Schwab, Robinhood, Fidelity, Merrill Edge, and the
   [stockpile manual format](docs/stockpile-format.md)), Yahoo Finance
-  and Schwab live API helpers, FIFO analysis, Black-Scholes pricing
-- **tools** — one-off migration scripts: Schwab→Robinhood CSV
-  conversion, Merrill Edge PDF statement extractor
-- **[positions](positions/README.md)** — Google Sheets position tracker
-- **[cost-basis-charts](cost-basis-charts/README.md)** — Interactive
-  cost basis vs. price charts (YouTube tutorial project)
-- **[options-scanner](options-scanner/README.md)** — Rank options by
-  how far their implied volatility sits above or below a fitted
-  surface, surfacing IV-rich candidates to sell or IV-cheap ones to
-  buy. Three entry points: a CLI scanner for a single ticker, a
-  portfolio scanner that reads a brokerage CSV, and a Streamlit web UI.
-  Supports Yahoo Finance (default, no setup) or the Schwab developer
-  API (real-time quotes and Greeks)
-- **[google-sheets-setup](google-sheets-setup/README.md)** — Google
-  Sheets API setup docs
+  and Schwab live API helpers, FIFO analysis, Black-Scholes pricing.
 
 ## Quick start
 
@@ -77,56 +74,13 @@ A browser tab opens at http://localhost:8501. Type a ticker on the
 **Single Ticker** tab and hit Scan, or drag a brokerage CSV onto the
 **Portfolio** tab.
 
-For the other tools (charts, positions tracker), see the
-[Running the projects](#running-the-projects) section below.
-
-## Using Claude Code with this repo
-
-The easiest way to get any of these tools running is with a Claude
-Code subscription. Clone the repo, open Claude Code in the project
-directory, and ask it to help you configure and run the tool with
-your own brokerage export. It can walk you through setup, fix any
-issues, and add new features — no manual coding required. All of the
-tools in this repo were built this way.
-
-Get Claude Code at: https://claude.ai/code
-
-Subscriptions start at $20/month (Pro plan). The Max plan ($100/month)
-gives higher usage limits, which is useful for longer coding sessions.
-
-### Project slash commands
-
-This repo ships with project-scoped slash commands under
-`.claude/commands/`. Inside a Claude Code session, type `/` to see
-them:
-
-| Command | What it does |
-|---------|--------------|
-| `/scan TICKER [flags]` | Run the options-scanner CLI for one ticker |
-| `/scan-portfolio --csv FILE` | Scan every open position in a brokerage CSV |
-| `/scan-ui` | Launch the options scanner web UI |
-| `/charts [--symbol X]` | Generate cost-basis charts |
-| `/positions` | Run the Google Sheets position tracker |
+For setup details, brokerage CSV configuration, and tool-specific
+commands, see each tool's README linked above.
 
 ## Requirements
 
-- Python 3.12 or later
-- [uv](https://docs.astral.sh/uv/) — fast Python package and project
-  manager (replaces pip + venv)
-
-## Installing Python
-
-If you don't have Python 3.12+, the easiest way is to let `uv` manage
-it for you:
-
-```bash
-uv python install 3.12
-```
-
-Or install manually from [python.org](https://www.python.org/downloads/)
-and ensure `python3 --version` reports 3.12+.
-
-## Installing uv
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) — install once with:
 
 ```bash
 # macOS / Linux
@@ -136,184 +90,50 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-After installation, restart your terminal so `uv` is on your PATH.
+`uv sync` creates a single shared `.venv/` for all sub-projects and
+installs everything. `uv run` activates it automatically — no manual
+`activate` needed.
 
-## How the virtual environment works
+## Using Claude Code with this repo
 
-This repo uses **uv workspaces**. The root `pyproject.toml` declares
-all sub-projects (`shared`, `positions`, `cost-basis-charts`,
-`options-scanner`) as workspace members. When you run `uv sync`, uv:
+All of the tools in this repo were built with a Claude Code
+subscription. Clone the repo, open Claude Code in the project
+directory, and ask it to help you configure and run any tool with
+your own brokerage export.
 
-1. Creates a single shared `.venv/` at the repo root
-2. Installs all dependencies for every workspace member into it
-3. Installs `shared` (the `stocks-shared` package) as an editable
-   local package so changes to it are immediately reflected in the
-   other projects
+Get Claude Code at: https://claude.ai/code
 
-You never need to activate the virtual environment manually — `uv run`
-handles that automatically.
+### Project slash commands
 
-## Setup
+Inside a Claude Code session, type `/` to see project commands:
 
-Clone the repo and sync dependencies (run once, and again after any
-`pyproject.toml` change):
-
-```bash
-git clone https://github.com/medloh/stockpile.git
-cd stockpile
-uv sync
-```
-
-### After a `git pull`
-
-`uv run` auto-syncs in most cases, so you can usually just re-run
-the same commands and uv handles the rest. If something looks off
-after pulling (import errors, missing modules, weird startup
-behavior), run `uv sync` once to force a clean re-sync:
-
-```bash
-git pull
-uv sync     # only needed if uv run misbehaves after the pull
-```
-
-## Running the projects
-
-Always use `uv run` from the **repo root**. This ensures the correct
-virtual environment and the `stocks-shared` package are available
-regardless of which sub-project you're running.
-
-```bash
-# Cost basis charts
-uv run cost-basis-charts/run_charts.py
-
-# Cost basis charts — single symbol only
-uv run cost-basis-charts/run_charts.py --symbol SCHW
-
-# Position tracker (Google Sheets)
-uv run positions/run_tracker.py
-
-# Options scanner — single ticker
-uv run options-scanner/run_scanner.py AMD --calls
-
-# Options scanner — every open position in a brokerage CSV
-uv run options-scanner/run_portfolio.py --csv input/schwab028.csv
-
-# Options scanner — Streamlit web UI (browser-based, no CLI knowledge)
-uv run streamlit run options-scanner/run_app.py
-```
-
-**Do not** use `python` or `python3` directly — those will use the
-system Python which doesn't have the project's dependencies installed.
-
-## Configuration
-
-Each sub-project has a `config.toml.example`. Copy it and fill in
-your details:
-
-```bash
-# macOS / Linux / Git Bash
-cp cost-basis-charts/config.toml.example cost-basis-charts/config.toml
-cp positions/config.toml.example positions/config.toml
-cp options-scanner/config.toml.example options-scanner/config.toml
-
-# Windows PowerShell or CMD
-copy cost-basis-charts\config.toml.example cost-basis-charts\config.toml
-copy positions\config.toml.example positions\config.toml
-copy options-scanner\config.toml.example options-scanner\config.toml
-```
-
-See the comments inside each file for what each field means.
-
-The options-scanner config is optional — Yahoo Finance works with no
-configuration. It is only needed to enable the Schwab data source
-(real-time quotes and Greeks). See
-[options-scanner/SCHWAB_DATA_SOURCE.md](options-scanner/SCHWAB_DATA_SOURCE.md)
-for setup instructions.
-
-Place your brokerage CSV exports in `input/` — both tools look there
-by default. The `input/` directory is gitignored so your files stay
-local.
-
-## Adding new dependencies
-
-To add a package to a specific sub-project:
-
-```bash
-uv add plotly --project cost-basis-charts
-```
-Then re-run `uv sync` to update the lockfile.
+| Command | What it does |
+|---------|--------------|
+| `/scan TICKER [flags]` | Run the options-scanner CLI for one ticker |
+| `/scan-portfolio --csv FILE` | Scan every open position in a brokerage CSV |
+| `/scan-ui` | Launch the options scanner web UI |
+| `/charts [--symbol X]` | Generate cost-basis charts |
+| `/positions` | Run the Google Sheets position tracker |
 
 ## Troubleshooting
 
 ### Windows: `ImportError: DLL load failed while importing base`
 
-If you see an error like this when running on Windows:
-
-```
-ImportError: DLL load failed while importing base:
-An Application Control policy has blocked this file.
-```
-
 This is Windows blocking pandas' C extension DLLs due to an
-Application Control policy. Try running from an **administrator
-PowerShell**:
+Application Control policy. Run from an **administrator PowerShell**:
 
-1. Right-click PowerShell and select **Run as administrator**
-2. Navigate to the repo: `cd path\to\stockpile`
-3. Run normally: `uv run cost-basis-charts/run_charts.py`
+1. Right-click PowerShell → **Run as administrator**
+2. `cd path\to\stockpile`
+3. Run the tool normally with `uv run ...`
 
 ## Contributing
 
-Contributions are welcome. Since this is a public repo, anyone can
-fork it and open a pull request — no special permissions needed on
-your end.
-
-### The fork → PR workflow
-
-1. **Fork the repo** on GitHub (top-right "Fork" button). This creates
-   your own copy under your GitHub account.
-
-2. **Clone your fork** and create a branch for your changes:
-   ```bash
-   git clone https://github.com/<your-username>/stockpile.git
-   cd stockpile
-   git checkout -b my-feature
-   ```
-
-3. **Make your changes**, then push the branch to your fork:
-   ```bash
-   git add <files>
-   git commit -m "describe your change"
-   git push origin my-feature
-   ```
-
-4. **Open a Pull Request** on GitHub. Navigate to your fork and click
-   **Contribute → Open pull request**. Set the base repository to
-   `medloh/stockpile` and base branch to `main`.
-
-5. **Review and merge** — the repo owner reviews the diff, leaves
-   any comments, and merges when ready.
-
-### Tips
-
-- Keep PRs focused on one change — easier to review and less likely
-  to conflict with other work.
-- If your branch falls behind `main`, rebase before opening the PR:
-  ```bash
-  git fetch upstream
-  git rebase upstream/main
-  ```
-  (Add the upstream remote once with
-  `git remote add upstream https://github.com/medloh/stockpile.git`)
-- PRs that touch `shared/` affect all sub-projects — mention that in
-  your PR description so it gets extra scrutiny.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the fork → PR
+workflow, and guidelines.
 
 ## License
 
 This project is free for personal, non-commercial use under the
 [Creative Commons Attribution-NonCommercial 4.0 International
 (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/)
-license. Commercial use is not permitted without a separate agreement.
-If you're interested in licensing this for commercial purposes, reach
-out to driekhof@gmail.com.
-
+license. For commercial licensing, contact driekhof@gmail.com.

@@ -44,3 +44,40 @@ def test_exclude_earnings_registered_and_labeled():
 def test_empty_config_is_identity():
     df = _df()
     assert len(iv_filters.apply(df, ())) == len(df)
+
+
+# ── funnel ────────────────────────────────────────────────────────────────────
+
+def test_funnel_final_remaining_matches_apply():
+    df = _df()
+    config = (("otm_only", frozenset()),
+              ("delta_range", frozenset({("lo", 0.0), ("hi", 0.35)})))
+    stages = iv_filters.funnel(df, config)
+    assert stages[-1][1] == len(iv_filters.apply(df, config))
+
+
+def test_funnel_labels_from_registry():
+    stages = iv_filters.funnel(_df(), (("otm_only", frozenset()),))
+    assert stages[0][0] == iv_filters.REGISTRY["otm_only"]["label"]
+
+
+def test_funnel_remaining_and_dropped_reconcile():
+    df = _df()
+    config = (("otm_only", frozenset()),
+              ("spread_pct", frozenset({("max_pct", 0.50)})),
+              ("delta_range", frozenset({("lo", 0.0), ("hi", 0.35)})))
+    prev = len(df)
+    for _label, remaining, dropped in iv_filters.funnel(df, config):
+        assert remaining + dropped == prev
+        prev = remaining
+
+
+def test_funnel_skips_unknown_filter():
+    stages = iv_filters.funnel(
+        _df(), (("nope", frozenset()), ("otm_only", frozenset())))
+    assert len(stages) == 1
+    assert stages[0][0] == iv_filters.REGISTRY["otm_only"]["label"]
+
+
+def test_funnel_empty_config_has_no_stages():
+    assert iv_filters.funnel(_df(), ()) == []

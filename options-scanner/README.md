@@ -31,6 +31,8 @@ For repo-wide setup (`uv sync`, etc.) see the
 **Videos:**
 [Option Scanner by Claude (Python, GitHub)](https://youtu.be/0H7BGJ3rJoQ)
 · [Find the Best Options with Schwab and Claude](https://youtu.be/-MsAMYX0kAM)
+· [Find the Best Covered Call — Options Scanner](https://youtu.be/WVGH-Hjbnjs?si=w6FqHtbGoJsx887d)
+· [I Asked Claude to Roll My Covered Call](https://youtu.be/qBNh6DIUSQQ?si=6M5g8Eu0mnODyb3g)
 
 ## Web UI
 
@@ -38,24 +40,34 @@ For repo-wide setup (`uv sync`, etc.) see the
 uv run streamlit run options-scanner/run_app.py
 ```
 
-A browser tab opens at `http://localhost:8501` with five tabs:
+A browser tab opens at `http://localhost:8501` with six tabs:
 
 - **Single Ticker** — type a symbol, pick Calls/Puts/Both and Sell/Buy,
   hit Scan. Filter inputs: Min DTE / Max DTE, Min OI, Min Vol (today's
-  trading volume), delta range, Top N. A collapsed **Surface fit
-  filters** expander lets you control which options enter the IV surface
-  regression (OTM-only, spread threshold, delta range, min OI for fit)
-  — all options still appear in results, only the fit is affected. You
-  get a volatility-surface chart (green line = fitted surface; top picks
-  labeled with their rank — `1` is the strongest signal per type), a
+  trading volume), delta range, Top N. A **Fit:** preset toggle
+  (Global / Per-expiry) plus an **Advanced surface fit** expander let
+  you control which options enter the IV surface regression (OTM-only,
+  spread threshold, delta range, min OI for fit) and which fit
+  algorithm/score runs — all options still appear in results, only the
+  fit is affected. You get a volatility-surface chart (dashed line =
+  fitted surface — green for Yahoo, blue for Schwab; top picks labeled
+  with their rank — `1` is the strongest signal per type), a
   per-expiration chain view sorted by strike with IV+pp row shading and
   a "Top" column showing the same rank, and a top candidates table
-  ranked across all expirations. A Market View card explains what your
+  ranked across all expirations. The surface chart marks contracts that
+  fed the fit (filled dots) vs. those a filter excluded (hollow), adds a
+  **Single / All expirations** view toggle to see the whole fitted
+  surface at once, and a **Surface-fit diagnostics** expander showing
+  where contracts dropped out of the fit and each expiration's fit
+  quality. A Market View card explains what your
   Direction × Option Type selection screens for, and selecting any
   candidate row opens an MC Analyze panel with the per-trade P&L
-  distribution. The data source (Yahoo Finance / Schwab) toggle sits in
-  the title bar so you can flip between sources without opening the
-  sidebar.
+  distribution. The data source (Yahoo Finance / Schwab / Moomoo)
+  toggle sits in the title bar so you can flip between sources without
+  opening the sidebar.
+- **GEX** — a standalone Gamma Exposure view for one ticker (the same
+  chart also appears below the volatility surface on the Single Ticker
+  tab). See the GEX section below.
 - **Portfolio** — drag in a brokerage CSV (Schwab, Robinhood, Fidelity,
   Merrill, or a hand-written
   [stockpile file](../docs/stockpile-format.md)), pick the format, hit
@@ -226,13 +238,24 @@ SPX!       use exactly "SPX" — fetches the stock, not the index
 | `--min-dte` | 30 | Minimum days to expiration |
 | `--max-dte` | 90 | Maximum days to expiration |
 | `--min-oi` | 25 | Minimum open interest. Filters the top candidates table only; the volatility-surface chart and per-expiration chain table show all strikes, with low-OI rows shaded yellow as a liquidity warning. |
+| `--min-vol` | 10 | Minimum daily volume (same table-only filtering as `--min-oi`) |
 | `--min-delta` | 0.10 | Exclude abs(delta) below this |
 | `--max-delta` | 0.75 | Exclude abs(delta) above this |
-| `--top` | 10 | Max rows shown in terminal |
+| `--min-strike` / `--max-strike` | — | Restrict candidates to a strike range |
+| `--min-ivpp` | — | Only show candidates with IV+pp at or above this |
+| `--top` | 4 | Max rows shown in terminal |
 | `--html` | off | Save an HTML report (see below) |
+| `--browser` | off | Save the report and open it in your browser (implies `--html`) |
 | `--output-dir` | `options-scanner/output/` | Directory for HTML files |
+| `--json` / `--agent` | off | Emit JSON instead of a table (`--agent` implies `--json --quiet`, for scripting) |
 | `--roll` | — | Roll mode (requires `--type`, `--strike`, `--expiration`) |
-| `--data-source` | from config | `yahoo` or `schwab` — overrides config.toml |
+| `--data-source` | from config | `yahoo`, `schwab`, or `moomoo` — overrides config.toml |
+| `--preset` | `current` | Surface-fit preset: `current` (global poly + IV+pp) or `v2` (per-expiration + z-score) |
+| `--algorithm` / `--fit-weights` / `--score` | from preset | Override individual surface-fit stages |
+
+For the complete, authoritative flag list (including `--quiet` and
+`--no-legend`) run `uv run options-scanner/run_scanner.py --help`, or
+see the `/scan` command reference at `.claude/commands/scan.md`.
 
 ### HTML report
 
@@ -245,7 +268,9 @@ uv run options-scanner/run_scanner.py AMD --calls --html
 
 The file is written to `options-scanner/output/` by default, named
 `{TICKER}_{type}_{action}_{date}.html` (e.g.
-`AMD_call_sell_20260505.html`). Open it in any browser — columns are
+`AMD_call_sell_20260505.html`). Non-default scans append extra segments
+(roll strike, a custom DTE or strike range, a non-default `--top`) so
+reports don't overwrite each other. Open it in any browser — columns are
 sortable by clicking the headers, and the IV+pp column is
 color-coded (green = IV-rich, a candidate to consider selling;
 red = IV-cheap, a candidate to consider buying).
@@ -341,8 +366,9 @@ annualized. This gives the true return on capital at risk.
 
 ## Gamma Exposure (GEX)
 
-The web UI single-ticker tab shows a **GEX bar chart** below the
-volatility surface chart. It is not available in the CLI.
+The web UI shows a **GEX bar chart** on its own **GEX** tab, and also
+below the volatility surface chart on the Single Ticker tab. It is not
+available in the CLI.
 
 ### What it is
 
@@ -417,13 +443,14 @@ by IV excess so the richest new premium surfaces first.
 
 ## Data sources
 
-The tool supports two data sources, selectable via `config.toml`,
+The tool supports three data sources, selectable via `config.toml`,
 the `--data-source` CLI flag, or the title-bar toggle in the web UI:
 
 | Source | Setup | Data quality |
 |--------|-------|-------------|
 | **Yahoo Finance** (default) | None — works out of the box | Delayed IV, no live Greeks |
 | **Schwab** | Free Schwab developer account; see [SCHWAB_DATA_SOURCE.md](SCHWAB_DATA_SOURCE.md) | Real-time quotes, actual Greeks |
+| **Moomoo** | Run the OpenD local gateway; US Level 2 subscription for live option Greeks | Real-time quotes and Greeks |
 
 When using Schwab, delta comes directly from Schwab's model rather
 than being estimated via Black-Scholes from stale IV. Earnings dates
