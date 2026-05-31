@@ -35,6 +35,9 @@ input/*.bak
 charts/
 output/
 *.html
+# Allow trading-dashboard templates to be tracked
+!trading-dashboard/templates/
+!trading-dashboard/templates/**
 
 # Scanner persistent cache (IV-history SQLite store, etc.)
 cache/

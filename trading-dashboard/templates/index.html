@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Live Trading Dashboard</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}"/>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <div class="logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 17l5-5 4 4 7-9"/><path d="M20 7h-5"/>
+        </svg>
+      </div>
+      <div>
+        <h1>Live Trading Dashboard</h1>
+        <div class="sub">Hyperliquid (Crypto) &middot; Yahoo Finance</div>
+      </div>
+    </div>
+    <div class="toolbar">
+      <select id="chartCount">
+        <option value="1" selected>1</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+        <option value="6">6</option>
+        <option value="8">8</option>
+      </select>
+      <button id="resetBtn">&#8635; Reset panes</button>
+    </div>
+  </header>
+  <main id="dashboard" class="grid layout-4"></main>
+</div>
+<script src="{{ url_for('static', filename='js/indicators.js') }}"></script>
+<script src="{{ url_for('static', filename='js/indicators-render.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

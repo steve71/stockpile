@@ -112,17 +112,22 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
                    algo_config: AlgorithmConfig = ALGO_DEFAULT,
                    score_config: ScoreConfig = SCORE_DEFAULT,
                    moomoo_config: dict | None = None,
-                   fit_both_sides: bool = True):
-    """Cached per-ticker chain fetch for portfolio tab. With fit_both_sides
-    (the default) the IV surface is anchored on both wings (calls + puts),
-    but only calls are returned — the covered-call roll flow the portfolio
-    tab expects. Two-sided fitting keeps the surface curvature stable; see
-    fetch_and_enrich."""
+                   fit_both_sides: bool = True,
+                   opt_type: str = "calls",
+                   max_dte: int | None = 90):
+    """Cached per-ticker chain fetch for portfolio tab.
+
+    opt_type controls which side(s) are returned: "calls", "puts", or "both".
+    Regardless of opt_type, both sides are fetched when fit_both_sides is True
+    so the IV surface is anchored on both wings — see fetch_and_enrich.
+    max_dte mirrors the same parameter on fetch_and_enrich; None = no upper limit.
+    """
     from options_scanner.chain import fetch_chain
-    fetch_type = "both" if fit_both_sides else "calls"
+    fetch_type = "both" if fit_both_sides else opt_type
     try:
         df = fetch_chain(ticker, opt_type=fetch_type, min_dte=min_dte,
-                         provider=provider, schwab_config=schwab_config,
+                         max_dte=max_dte, provider=provider,
+                         schwab_config=schwab_config,
                          moomoo_config=moomoo_config)
     except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
         return pd.DataFrame(), [], str(exc)
@@ -132,6 +137,7 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
         return df, [], None
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
                            score_config)
-    if fit_both_sides and not df.empty:
-        df = df[df["type"] == "call"].reset_index(drop=True)
+    if not df.empty and opt_type in ("calls", "puts"):
+        side = "call" if opt_type == "calls" else "put"
+        df = df[df["type"] == side].reset_index(drop=True)
     return df, earnings, None

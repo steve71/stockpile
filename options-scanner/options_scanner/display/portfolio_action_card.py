@@ -1,20 +1,14 @@
 """Recommended Action card for the Portfolio tab.
 
-For each open position in the uploaded brokerage CSV, picks the
-same rank-1 IV-rich call the candidates table would, then renders
-it as an explicit instruction card above the table:
+For each position scanned, picks the rank-1 IV-rich option and renders it
+as an explicit instruction card above the candidates table:
 
-  ROLL                — existing covered call: BTC + STO with the
-                        net credit and the new stock breakeven.
-  SELL TO OPEN        — ≥100 shares, no open call: auto-sized
-                        contracts, premium, max profit, ~delta
-                        assignment probability, stock breakeven.
-  Stock position too  — <100 shares: amber accent, explicit "not
-  small               actionable" rather than a misleading partial
-                        figure.
-
-Shares the four-tone accent palette with the Market View card via
-display.outlook_card.OUTLOOK_TONE_HEX.
+  ROLL                — existing short call/put: BTC + STO steps with net
+                        credit and new breakeven.
+  SELL TO OPEN        — covered call (≥ 100 shares) or cash-secured put
+                        (1-contract reference unit).
+  Not actionable      — calls when < 100 shares held; shows top pick for
+                        reference only (amber accent).
 """
 
 from __future__ import annotations
@@ -32,26 +26,22 @@ def render_portfolio_action_card(
     shares: int,
     covered: bool,
     roll_close: float | None,
-    open_calls: list[dict],
+    open_options: list[dict],
     min_oi: int,
     min_vol: int,
+    opt_type: str = "calls",
 ) -> None:
     """Translate the top IV-rich candidate into an explicit buy/sell action.
 
-    The Portfolio table shows raw option data — this card surfaces the
-    'so what should I do?' answer with strike, premium, cash flow, and
-    breakeven math computed against the user's actual share count.
+    covered=True + roll_close supplied → ROLL: BTC existing, STO top pick.
+    Otherwise → STO the top pick (covered call for calls; CSP for puts).
 
-    Covered (existing short call) → ROLL: buy back the open call, sell
-    the new top pick, show net credit/debit + new breakeven.
-
-    Uncovered (just stock) → SELL TO OPEN: write covered calls. Number
-    of contracts is auto-sized to the user's share count (shares // 100).
+    opt_type is "calls" or "puts"; never "both" — the caller splits the df
+    and calls this function once per side when opt_type is "both".
     """
-    # Pick the same #1 row the ranked table picks: highest-ranked
-    # (descending signal_score) with open_interest tie-break.
+    type_filter = "put" if opt_type == "puts" else "call"
     eligible = df_filt[
-        (df_filt["type"] == "call")
+        (df_filt["type"] == type_filter)
         & (df_filt["open_interest"] >= min_oi)
         & (df_filt["volume"] >= min_vol)
     ]
@@ -68,34 +58,81 @@ def render_portfolio_action_card(
     mid = float(pick["mid"])
     iv_excess_pp = float(pick["iv_excess"]) * 100.0
     delta = float(pick.get("delta", 0.0))
-    max_contracts = max(1, shares // 100)
 
     accent = OUTLOOK_TONE_HEX["pos"]   # green — premium income
 
-    if covered and roll_close is not None and open_calls:
-        # ── ROLL action ───────────────────────────────────────────────
-        existing = open_calls[0]
+    if covered and roll_close is not None and open_options:
+        # ── ROLL (calls or puts) ──────────────────────────────────────────
+        existing = open_options[0]
         net_cr_per_contract = (mid - roll_close) * 100.0
         net_cr_total = net_cr_per_contract * existing["contracts"]
         sign = "+" if net_cr_per_contract >= 0 else "−"
-        action_label = "ROLL existing covered call"
+
+        if opt_type == "puts":
+            action_label = "ROLL existing short put"
+            opt_code = f"{ticker} ${strike:.0f}P exp {expiry}"
+            effective_buy = strike - (mid - roll_close)
+            breakeven_line = (
+                f"<b>Effective buy price if assigned:</b> ${effective_buy:.2f}"
+                f" (strike − net credit)"
+            )
+        else:
+            action_label = "ROLL existing covered call"
+            opt_code = f"{ticker} ${strike:.0f}C exp {expiry}"
+            new_be = strike + (mid - roll_close)
+            breakeven_line = (
+                f"<b>New breakeven (stock):</b> ${new_be:.2f}"
+                f" — below this the roll costs you net"
+            )
+
         action_lines = [
-            f"<b>1) Buy to close</b> {existing['contracts']}× <code>{existing['symbol']}</code> at mid ~${roll_close:.2f} → pay <b>${roll_close * 100 * existing['contracts']:,.0f}</b>",
-            f"<b>2) Sell to open</b> {existing['contracts']}× <code>{ticker} ${strike:.0f}C exp {expiry}</code> at mid ~${mid:.2f} → collect <b>${mid * 100 * existing['contracts']:,.0f}</b>",
-            f"<b>Net result:</b> {sign}${abs(net_cr_total):,.0f} ({sign}${abs(net_cr_per_contract):.2f}/contract)",
+            f"<b>1) Buy to close</b> {existing['contracts']}×"
+            f" <code>{existing['symbol']}</code>"
+            f" at mid ~${roll_close:.2f} →"
+            f" pay <b>${roll_close * 100 * existing['contracts']:,.0f}</b>",
+            f"<b>2) Sell to open</b> {existing['contracts']}×"
+            f" <code>{opt_code}</code>"
+            f" at mid ~${mid:.2f} →"
+            f" collect <b>${mid * 100 * existing['contracts']:,.0f}</b>",
+            f"<b>Net result:</b> {sign}${abs(net_cr_total):,.0f}"
+            f" ({sign}${abs(net_cr_per_contract):.2f}/contract)",
         ]
-        breakeven_line = f"<b>New breakeven (stock):</b> ${strike + (mid - roll_close):.2f} — below this the roll costs you net"
+
+    elif opt_type == "puts":
+        # ── SELL TO OPEN cash-secured put (1-contract reference unit) ────
+        premium = mid * 100.0
+        margin_approx = strike * 100.0
+        assign_prob = abs(delta) * 100.0
+        breakeven_stock = strike - mid
+        action_label = "SELL TO OPEN cash-secured put"
+        action_lines = [
+            f"<b>Action:</b> Sell 1× <code>{ticker} ${strike:.0f}P exp {expiry}</code>"
+            f" to open at mid ~${mid:.2f}",
+            f"<b>Premium collected:</b> ${premium:,.0f} (1 contract)",
+            f"<b>Cash required (approx.):</b> ${margin_approx:,.0f} (strike × 100)",
+            f"<b>Assignment probability:</b> ~{assign_prob:.0f}% (|Δ| proxy)",
+        ]
+        breakeven_line = (
+            f"<b>Breakeven (stock):</b> ${breakeven_stock:.2f}"
+            f" — below this, net loss on assignment"
+        )
+
     else:
-        # ── SELL TO OPEN (covered call) ───────────────────────────────
+        # ── SELL TO OPEN covered call ─────────────────────────────────────
         if shares < 100:
-            action_label = "Stock position too small for covered call"
+            pos_desc = ("No stock position" if shares == 0
+                        else f"You hold <b>{shares}</b> shares")
+            action_label = "Covered call not available"
             action_lines = [
-                f"You hold <b>{shares}</b> shares — a covered call requires at least 100 shares per contract.",
-                f"Top IV-rich call for reference: <code>{ticker} ${strike:.0f}C exp {expiry}</code> at mid ~${mid:.2f}",
+                f"{pos_desc} — need at least 100 shares per contract.",
+                f"Top IV-rich call for reference:"
+                f" <code>{ticker} ${strike:.0f}C exp {expiry}</code>"
+                f" at mid ~${mid:.2f}",
             ]
             breakeven_line = ""
-            accent = OUTLOOK_TONE_HEX["neutral"]   # amber — informational, not actionable
+            accent = OUTLOOK_TONE_HEX["neutral"]
         else:
+            max_contracts = shares // 100
             premium_per_contract = mid * 100.0
             premium_total = premium_per_contract * max_contracts
             max_profit_per_share = max(0.0, strike - spot) + mid
@@ -103,17 +140,27 @@ def render_portfolio_action_card(
             assign_prob = abs(delta) * 100.0
             action_label = "SELL TO OPEN covered call"
             action_lines = [
-                f"<b>Action:</b> Sell {max_contracts}× <code>{ticker} ${strike:.0f}C exp {expiry}</code> to open at mid ~${mid:.2f}",
-                f"<b>Premium collected:</b> ${premium_total:,.0f} ({max_contracts} contract(s) × ${premium_per_contract:,.0f})",
-                f"<b>Max profit if assigned at ${strike:.0f}:</b> ${max_profit_total:,.0f} (capped — your stock gets called away)",
+                f"<b>Action:</b> Sell {max_contracts}×"
+                f" <code>{ticker} ${strike:.0f}C exp {expiry}</code>"
+                f" to open at mid ~${mid:.2f}",
+                f"<b>Premium collected:</b> ${premium_total:,.0f}"
+                f" ({max_contracts} contract(s) × ${premium_per_contract:,.0f})",
+                f"<b>Max profit if assigned at ${strike:.0f}:</b>"
+                f" ${max_profit_total:,.0f} (capped — stock gets called away)",
                 f"<b>Assignment probability:</b> ~{assign_prob:.0f}% (Δ proxy)",
             ]
-            breakeven_line = f"<b>Breakeven (stock):</b> ${spot - mid:.2f} — covered down to this price by the premium received"
+            breakeven_line = (
+                f"<b>Breakeven (stock):</b> ${spot - mid:.2f}"
+                f" — covered down to this price by the premium received"
+            )
 
-    lines_html = "".join(f"<li style='margin: 3px 0;'>{l}</li>" for l in action_lines)
-    be_html = (f"<div style='margin-top: 6px; font-size: 0.78rem; "
-               f"color: var(--osc-ink-3);'>{breakeven_line}</div>"
-               if breakeven_line else "")
+    lines_html = "".join(f"<li style='margin: 3px 0;'>{l}</li>"
+                         for l in action_lines)
+    be_html = (
+        f"<div style='margin-top: 6px; font-size: 0.78rem;"
+        f" color: var(--osc-ink-3);'>{breakeven_line}</div>"
+        if breakeven_line else ""
+    )
     st.html(
         f"""
         <div style="
