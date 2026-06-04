@@ -3,6 +3,8 @@
 import os
 import logging
 
+from options_scanner.format import fmt_strike
+
 log = logging.getLogger(__name__)
 
 
@@ -41,7 +43,7 @@ def generate_explanation(
     for _, r in top.iterrows():
         spread_pct = (r["ask"] - r["bid"]) / r["mid"] * 100 if r["mid"] > 0 else 0
         line = (
-            f"  ${r['strike']:.0f} exp {r['expiration']} "
+            f"  {fmt_strike(r['strike'])} exp {r['expiration']} "
             f"DTE={r['dte']} mid=${r['mid']:.2f} "
             f"spread={spread_pct:.0f}% "
             f"IV={r['iv']*100:.1f}% IV+pp={r['iv_excess']*100:+.1f} "

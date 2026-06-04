@@ -28,6 +28,7 @@ from options_scanner.display.spot_meta import (
     spot_value_html,
 )
 from options_scanner.fetch import fetch_and_enrich
+from options_scanner.format import fmt_strike
 from options_scanner.mc_ui import LegSpec, position_from_legs, render_mc_panel
 from options_scanner.ui_theme import metric_card, section_header
 
@@ -83,15 +84,15 @@ def _show_spreads_table(
         row_d = {
             "Expiration": r["expiration"],
             "DTE":        int(r["dte"]),
-            "Short $":    f"${r['short_strike']:.0f}",
-            "Long $":     f"${r['long_strike']:.0f}",
+            "Short $":    fmt_strike(r['short_strike']),
+            "Long $":     fmt_strike(r['long_strike']),
         }
         if has_two_sides:
             ss2 = r.get("short_strike2")
             ls2 = r.get("long_strike2")
             if ss2 and not pd.isna(ss2):
-                row_d["Short $2"] = f"${ss2:.0f}"
-                row_d["Long $2"]  = f"${ls2:.0f}"
+                row_d["Short $2"] = fmt_strike(ss2)
+                row_d["Long $2"]  = fmt_strike(ls2)
 
         credit = float(r["net_credit"])
         row_d["Credit/Debit"] = credit

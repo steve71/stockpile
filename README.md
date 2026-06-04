@@ -1,7 +1,8 @@
 # stockpile
 
 Monorepo of stock portfolio tools: options scanner, position
-tracker, cost basis charts, and shared parsing/finance utilities.
+tracker, cost basis charts, trading dashboard, and shared
+parsing/finance utilities.
 
 > **Disclaimer** — This software is provided free of charge for
 > non-commercial use, as-is, with no warranty of any kind. There is
@@ -18,9 +19,9 @@ tracker, cost basis charts, and shared parsing/finance utilities.
 
 ## Videos
 
-These tools were built live on YouTube using Claude Code. Watch to
-see how each tool was made and how to use it with your own brokerage
-data.
+These tools were built by me together with Claude Code, with help
+from open-source contributors. The YouTube videos walk through how
+each one works and how to use it with your own brokerage data.
 
 ### Stockpile tools
 
@@ -51,6 +52,9 @@ A companion series on building a Yahoo Finance CLI with Claude Code
   tracker fed from brokerage CSV exports.
 - **[cost-basis-charts](cost-basis-charts/README.md)** — Interactive
   cost basis vs. price charts.
+- **[trading-dashboard](trading-dashboard/README.md)** — Live
+  multi-pane charting dashboard with technical indicators for crypto
+  (Hyperliquid) and equities (Yahoo Finance). Standalone Flask app.
 - **[google-sheets-setup](google-sheets-setup/README.md)** — Google
   Sheets API setup docs.
 - **shared** — pip-installable `stocks-shared` package: CSV parsers
@@ -76,6 +80,27 @@ A browser tab opens at http://localhost:8501. Type a ticker on the
 
 For setup details, brokerage CSV configuration, and tool-specific
 commands, see each tool's README linked above.
+
+## Updating
+
+To pull in the latest changes:
+
+**If you cloned with git:**
+
+```bash
+cd stockpile
+git pull
+uv sync          # picks up any new/changed dependencies
+```
+
+**If you downloaded the ZIP from GitHub:** download it again (green
+**Code** button → **Download ZIP**), unzip it, and copy the contents
+over your existing `stockpile` folder, replacing files when prompted.
+Then run `uv sync` to pick up any dependency changes.
+
+Either way your local data is preserved: `config.toml`, brokerage CSVs
+in `input/`, and your own saved watchlists are gitignored, so updating
+never overwrites them. (The bundled starter watchlists may update.)
 
 ## Requirements
 

@@ -56,6 +56,20 @@ uv run options-scanner/run_portfolio.py --csv input/schwab028.csv \
     --html --tickers AAPL AMD
 ```
 
+### Trading dashboard (live charts)
+
+```bash
+uv run trading-dashboard/app.py
+```
+
+Flask app at `http://localhost:5000` — multi-pane live candlestick
+charts. Per-pane data source: **Yahoo Finance** or **Schwab** for
+stocks, **Hyperliquid** for crypto. Schwab bars + real-time mark reuse
+`stocks_shared.schwab_live` and the **shared** `[schwab]` credentials
+in `options-scanner/config.toml` (same `~/.config/schwab-token.json`,
+7-day token TTL — re-run `schwab_auth.py` if Schwab quotes go empty).
+`run.cmd` / `run.sh` wrap the same `uv run`.
+
 ## Project structure
 
 - `shared/` — pip-installable `stocks-shared` package: CSV parsers,
@@ -63,6 +77,8 @@ uv run options-scanner/run_portfolio.py --csv input/schwab028.csv \
 - `positions/` — Google Sheets position tracker
 - `cost-basis-charts/` — cost basis vs. price charts
 - `options-scanner/` — options scanner (web UI + CLI)
+- `trading-dashboard/` — Flask live candlestick dashboard
+  (yfinance / Schwab / Hyperliquid data sources)
 - `google-sheets-setup/` — Google Sheets API setup docs
 - `input/` — brokerage CSV exports (gitignored)
 

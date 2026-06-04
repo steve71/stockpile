@@ -23,7 +23,9 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner.compute.top_ranks import compute_top_ranks
+from options_scanner.format import STRIKE_D3_FORMAT
 from options_scanner.display.scan_stamp import scan_stamp_color, scan_stamp_text
+from options_scanner.display.iv_surface_3d import render_iv_surface_3d
 
 
 _PROVIDER_LINE = {
@@ -32,13 +34,31 @@ _PROVIDER_LINE = {
 }
 
 
+def _is_monthly_expiration(exp_str: str) -> bool:
+    """Standard monthly options expire the 3rd Friday of the month.
+
+    Inferred from the date since the normalized chain carries no
+    weekly/monthly flag (Schwab's API has expirationType but we don't
+    plumb it through; Yahoo has none). A heuristic — holiday-shifted or
+    AM-settled expirations can deviate — but correct for the vast
+    majority of equity options.
+    """
+    try:
+        d = datetime.strptime(exp_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return False
+    # 3rd Friday = the Friday in day-of-month range 15–21.
+    return d.weekday() == 4 and 15 <= d.day <= 21
+
+
 def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
                   min_oi: int, top_n: int, buy: bool,
                   ticker: str = "", key_prefix: str = "s",
                   min_vol: int = 0, provider: str = "yahoo",
                   earnings_dates: list | None = None,
                   surface_filters: tuple | None = None,
-                  df_full: pd.DataFrame | None = None) -> None:
+                  df_full: pd.DataFrame | None = None,
+                  delta_range: tuple[float, float] | None = None) -> None:
     """Layered chart: per-expiration smile with the table's top-N picks
     highlighted. Background dots are the rest of the chain at the selected
     expiration — filled if they anchored the surface fit, hollow if the
@@ -81,6 +101,8 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
         frame["FittedIV%"] = (frame["iv_fitted"] * 100).round(2)
         frame["IV+pp"]     = (frame["iv_excess"] * 100).round(2)
         frame["Ann%"]      = frame["ann_yield_pct"].round(2)
+        frame["Spread"]    = (frame["ask"] - frame["bid"]).round(2)
+        frame["Last"]      = frame["last"].where(frame["last"] > 0)
         if _show_score:
             frame[_score_kind] = (frame["signal_score"] * _mult).round(2)
         return frame
@@ -118,20 +140,27 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
             "<h5 style='margin:0 0 5px 0'>Volatility surface</h5>",
             unsafe_allow_html=True,
         )
+    # The 3D view needs the full multi-expiration chain (Single tab only;
+    # the Portfolio tab omits df_full).
+    _has_full = df_full is not None and not df_full.empty
+    _view_opts = (["Single expiration", "All expirations", "3D surface"]
+                  if _has_full else ["Single expiration", "All expirations"])
     with h2:
         view = st.radio(
-            "View", ["Single expiration", "All expirations"],
+            "View", _view_opts,
             horizontal=True, key=f"{key_prefix}_surface_view",
             label_visibility="collapsed",
             help="Single = one expiration's smile vs. its surface line. "
                  "All expirations = every expiration's fitted surface line "
-                 "on one chart, colored by DTE — the whole term structure.",
+                 "on one chart, colored by DTE. 3D surface = the whole chain "
+                 "as strike × DTE × IV — drag to rotate.",
         )
 
-    # All-expirations overlay: one fitted line per expiration on a shared
-    # chart. Uses the full chain when available (wider strike span), else
-    # the displayed frame (e.g. the Portfolio tab, which omits df_full).
-    if view == "All expirations":
+    # Multi-expiration views ("All expirations" 2D fan and "3D surface")
+    # share the same source frame + fit-range setup. Both use the full chain
+    # when available (wider strike span), else the displayed frame (e.g. the
+    # Portfolio tab, which omits df_full).
+    if view in ("All expirations", "3D surface"):
         if df_full is not None and not df_full.empty:
             _src = (df_full[df_full["type"] == mode]
                     if mode in ("call", "put") else df_full)
@@ -143,14 +172,19 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
         # Strike range that actually anchored the fit (both wings, every
         # expiration). Beyond it the global surface is unsupported
         # extrapolation — the source of the spurious far-OTM/ITM humps — so
-        # the overlay clips its lines to this span.
+        # the views clip to this span.
         fit_range = None
         if "in_fit" in _support_src.columns:
             _anchors = _support_src[_support_src["in_fit"].astype(bool)]
             if not _anchors.empty:
                 fit_range = (float(_anchors["strike"].min()),
                              float(_anchors["strike"].max()))
-        _render_all_expirations(overlay_df, spot, ticker, mode, fit_range)
+        if view == "3D surface":
+            render_iv_surface_3d(overlay_df, spot, ticker, mode, buy,
+                                 fit_range, delta_range=delta_range,
+                                 min_oi=min_oi, min_vol=min_vol, top_n=top_n)
+        else:
+            _render_all_expirations(overlay_df, spot, ticker, mode, fit_range)
         return
 
     chosen_exp = st.selectbox(
@@ -159,13 +193,15 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
         index=default_idx,
         format_func=lambda d: (
             f"{'★ ' if d in best_exps else ''}{exp_labels[d]}"
+            f"{' Ⓜ' if _is_monthly_expiration(d) else ''}"
             f"  ({pick_counts[d]} pick"
             f"{'s' if pick_counts[d] != 1 else ''})"
         ),
         key=f"{key_prefix}_chart_exp",
         help=("Each expiration has its own volatility smile. The number "
               "in parentheses is how many of the table's top picks live "
-              "at that expiration."),
+              "at that expiration. Ⓜ marks standard monthly expirations "
+              "(3rd Friday) — typically the most liquid."),
         label_visibility="collapsed",
     )
 
@@ -258,7 +294,7 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     base_x = alt.X(
         "strike:Q", title="Strike",
         scale=alt.Scale(domain=[x_min, x_max]),
-        axis=alt.Axis(format="$,.0f"),
+        axis=alt.Axis(format=STRIKE_D3_FORMAT),
     )
     y_scale = alt.Scale(domain=[y_min, y_max])
     base_y = alt.Y("IV%:Q", title="Implied Volatility (%)", scale=y_scale)
@@ -268,7 +304,7 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
                      "VRP": ".2f", "IV %ile": ".0f"}
     _score_d3_fmt = _SCORE_D3_FMT.get(_score_kind, "+.2f")
     tooltip_fields = [
-        alt.Tooltip("strike:Q",       title="Strike",          format="$,.0f"),
+        alt.Tooltip("strike:Q",       title="Strike",          format=STRIKE_D3_FORMAT),
         alt.Tooltip("type:N",         title="Type"),
         alt.Tooltip("IV%:Q",                                   format=".1f"),
         alt.Tooltip("FittedIV%:Q",    title="Surface IV%",     format=".1f"),
@@ -282,6 +318,8 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
         alt.Tooltip("open_interest:Q", title="OI"),
         alt.Tooltip("bid:Q",          title="Bid",             format="$.2f"),
         alt.Tooltip("ask:Q",          title="Ask",             format="$.2f"),
+        alt.Tooltip("Spread:Q",       title="Spread",          format="$.2f"),
+        alt.Tooltip("Last:Q",         title="Last",            format="$.2f"),
         *([alt.Tooltip("in_fit:N", title="In surface fit")]
           if "in_fit" in sub.columns else []),
     ]
@@ -305,8 +343,8 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     else:
         bg_fit, bg_excl = bg_rest, bg_rest.iloc[0:0]
 
-    background = alt.Chart(bg_fit).mark_circle(
-        size=60, opacity=1.0,
+    background = alt.Chart(bg_fit).mark_point(
+        size=60, opacity=1.0, filled=True,
     ).encode(
         x=base_x,
         y=base_y,
@@ -318,7 +356,7 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     )
 
     excluded = alt.Chart(bg_excl).mark_point(
-        size=60, opacity=0.9, filled=False, strokeWidth=1.5,
+        size=70, opacity=1.0, filled=False, strokeWidth=2.6,
     ).encode(
         x=base_x,
         y=base_y,
@@ -364,12 +402,36 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
         text="label:N",
     )
 
+    # When the "show all fit points" toggle reveals strikes outside the
+    # display delta range, shade the strike bands beyond the normally
+    # displayed span so the extra points read as out-of-range context.
+    shade_layers = []
+    if show_all_fit:
+        _shown = chart_df[chart_df["expiration"] == chosen_exp]
+        if not _shown.empty:
+            shown_lo = float(_shown["strike"].min())
+            shown_hi = float(_shown["strike"].max())
+            bands = []
+            if x_min < shown_lo:
+                bands.append({"x": x_min, "x2": shown_lo})
+            if shown_hi < x_max:
+                bands.append({"x": shown_hi, "x2": x_max})
+            if bands:
+                shade = alt.Chart(pd.DataFrame(bands)).mark_rect(
+                    color="#64748b", opacity=0.09,
+                ).encode(
+                    x=alt.X("x:Q", scale=alt.Scale(domain=[x_min, x_max])),
+                    x2="x2:Q",
+                )
+                shade_layers.append(shade)
+
     type_word = {"call": "calls", "put": "puts", "both": "options"}[mode]
     title_text = (f"{ticker} {type_word} — {exp_labels[chosen_exp]}"
                   if ticker else f"{type_word} — {exp_labels[chosen_exp]}")
-    chart = (
-        line_surface + background + excluded + picks + ranks
-        + spot_rule + spot_label
+    chart = alt.layer(
+        *shade_layers,
+        line_surface, background, excluded, picks, ranks,
+        spot_rule, spot_label,
     ).properties(
         height=380,
         title=alt.TitleParams(
@@ -383,6 +445,14 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     )
     st.altair_chart(chart, width='stretch')
 
+    shade_note = (
+        "<br>"
+        "<span style='background:rgba(100,116,139,0.16);padding:0 0.35em'>"
+        "&nbsp;&nbsp;&nbsp;</span>"
+        " <b>Shaded band</b> = strikes outside the display &Delta; range,"
+        " revealed by the toggle above."
+        if show_all_fit and shade_layers else ""
+    )
     st.markdown(
         "<div style='font-size:0.8rem;line-height:1.9;color:var(--osc-ink-3)'>"
         "<span style='color:#10b981'>&#9632;&#9632; &mdash; &mdash;</span>"
@@ -401,6 +471,7 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
         "<b>Large outlined dot + number</b> = top pick;"
         " number matches rank in table below (1&nbsp;=&nbsp;strongest signal)."
         " Vertical dashed line = current spot price."
+        + shade_note +
         "</div>",
         unsafe_allow_html=True,
     )
@@ -448,7 +519,7 @@ def _render_all_expirations(frame: pd.DataFrame, spot: float,
     base_x = alt.X(
         "strike:Q", title="Strike",
         scale=alt.Scale(domain=[x_min, x_max]),
-        axis=alt.Axis(format="$,.0f"),
+        axis=alt.Axis(format=STRIKE_D3_FORMAT),
     )
     y_enc = alt.Y("FittedIV%:Q", title="Fitted IV (%)",
                   scale=alt.Scale(domain=[y_min, y_max]))
@@ -457,7 +528,7 @@ def _render_all_expirations(frame: pd.DataFrame, spot: float,
     tooltip = [
         alt.Tooltip("ExpDate:N",   title="Expiration"),
         alt.Tooltip("dte:Q",       title="DTE",         format="d"),
-        alt.Tooltip("strike:Q",    title="Strike",      format="$,.0f"),
+        alt.Tooltip("strike:Q",    title="Strike",      format=STRIKE_D3_FORMAT),
         alt.Tooltip("FittedIV%:Q", title="Surface IV%", format=".1f"),
         alt.Tooltip("IV%:Q",       title="IV%",         format=".1f"),
     ]

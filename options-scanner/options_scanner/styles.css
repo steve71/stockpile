@@ -176,6 +176,57 @@ html[data-osc-theme="dark"] .osc-wordmark-inline .osc-wm-suffix {
     color: #94A3B8;
 }
 
+/* Fetch/scan spinner — promote Streamlit's inline st.spinner to a big
+   centered floating overlay so it's always on screen during a scan,
+   instead of rendering in document flow below the Advanced surface fit
+   checkbox (where it can scroll out of view). Centered via inset+margin
+   auto (no transform, so it doesn't fight any fixed children); the
+   100vmax spread shadow dims the whole viewport without a backdrop el. */
+[data-testid="stSpinner"] {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: fit-content;
+    height: fit-content;
+    min-width: 230px;
+    min-height: 170px;
+    z-index: 999999;            /* above the title-bar pills (--z-pill) */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.1rem;
+    padding: 2.25rem 2.75rem;
+    background: rgba(255, 255, 255, 0.97);
+    border: 1px solid #DBEAFE;
+    border-radius: 16px;
+    box-shadow: 0 0 0 100vmax rgba(15, 23, 42, 0.38),
+                0 18px 50px rgba(15, 23, 42, 0.30);
+}
+/* Enlarge the spinner glyph (first child) without scaling the caption,
+   so the caption text width can't overflow the card. */
+[data-testid="stSpinner"] > div > *:first-child {
+    transform: scale(2.6);
+    transform-origin: center;
+    margin: 1.4rem;
+}
+[data-testid="stSpinner"] > div {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.9rem;
+}
+[data-testid="stSpinner"] > div > div {
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+html[data-osc-theme="dark"] [data-testid="stSpinner"] {
+    background: rgba(30, 41, 59, 0.97);
+    border-color: #334155;
+    box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55),
+                0 18px 50px rgba(0, 0, 0, 0.50);
+}
+
 /* Brand wordmark — in normal document flow just above the tabs, so it
    scrolls away with the page (the title-bar pills stay pinned). The
    matching <div> is emitted from run_app.py just before st.tabs. */

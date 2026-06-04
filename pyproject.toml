@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["shared", "positions", "cost-basis-charts", "options-scanner"]
+members = ["shared", "positions", "cost-basis-charts", "options-scanner", "trading-dashboard"]
 
 [tool.uv.sources]
 stocks-shared = { workspace = true }

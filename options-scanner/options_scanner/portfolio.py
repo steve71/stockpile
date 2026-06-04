@@ -11,6 +11,36 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 
+def detect_brokerage(content: bytes) -> str | None:
+    """Identify brokerage format from the first 8 KB of a CSV.
+
+    Returns a brokerage key or None if the format is not recognized.
+    Fingerprints: Schwab = "Fees & Comm", Fidelity = "Run Date",
+    Robinhood = "Trans Code" + "Activity Date", Merrill = "Symbol/ CUSIP",
+    Stockpile = lowercase header row starting with "symbol".
+    """
+    try:
+        text = content.decode("utf-8-sig", errors="replace")[:8192]
+    except Exception:
+        return None
+    if "Fees & Comm" in text:
+        return "schwab"
+    if "Run Date" in text:
+        return "fidelity"
+    if "Trans Code" in text and "Activity Date" in text:
+        return "robinhood"
+    if "Symbol/ CUSIP" in text:
+        return "merrill"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.lower().startswith("symbol") and "action" in stripped.lower():
+            return "stockpile"
+        break
+    return None
+
+
 def _get_parser(brokerage: str):
     b = brokerage.lower()
     if b == "schwab":
@@ -45,8 +75,13 @@ def _fetch_roll_chain(ticker: str, exp_yf: str, provider: str,
     return fetch_option_chain(ticker, exp_yf)
 
 
-def get_portfolio(csv_path: str, brokerage: str) -> list[dict]:
-    """Return open stock positions with associated open short options.
+def get_portfolio(csv_path: str, brokerage: str,
+                  include_closed: bool = False) -> list[dict]:
+    """Return stock positions with associated open short options.
+
+    With include_closed=False (default) only tickers with shares > 0 are
+    returned. With include_closed=True every ticker that ever appeared in the
+    CSV is returned (shares may be 0 for fully-exited positions).
 
     Each entry: {ticker, shares, open_calls, open_puts}
     """
@@ -74,13 +109,13 @@ def get_portfolio(csv_path: str, brokerage: str) -> list[dict]:
             elif action == "Sell":
                 shares -= q
 
-        if shares <= 0.001:                     # float-safe zero check
+        if not include_closed and shares <= 0.001:   # float-safe zero check
             continue
 
         open_opts = detect_open_positions(txns)
         positions.append({
             "ticker": ticker,
-            "shares": shares,
+            "shares": max(0.0, shares),
             "open_calls": [o for o in open_opts if o["type"] == "Call"],
             "open_puts":  [o for o in open_opts if o["type"] == "Put"],
         })

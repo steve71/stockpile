@@ -36,6 +36,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from options_scanner.format import fmt_strike
+
 _PATH = Path(__file__).parents[1] / "recent_scans.json"
 _MAX_ENTRIES = 12
 
@@ -101,7 +103,7 @@ def build_label(entry: dict) -> str:
             exp_fmt = datetime.strptime(exp, "%Y-%m-%d").strftime("%b %d '%y")
         except ValueError:
             exp_fmt = exp
-        return f"{ticker} [Roll] · {rtype} ${strike:.0f} · {exp_fmt}{oi_str}"
+        return f"{ticker} [Roll] · {rtype} {fmt_strike(strike)} · {exp_fmt}{oi_str}"
     else:
         otype = entry.get("option_type", "Calls").upper()
         direction = "BUY" if entry.get("buy") else "SELL"

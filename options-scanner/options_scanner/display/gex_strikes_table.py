@@ -14,6 +14,9 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from options_scanner.compute.gex_summary import per_strike_gex
+from options_scanner.format import fmt_strike
+
 
 def fmt_strike_with_dist(strike: float | None, spot: float) -> str:
     """Format a strike alongside its % distance from spot.
@@ -25,7 +28,7 @@ def fmt_strike_with_dist(strike: float | None, spot: float) -> str:
     if strike is None or pd.isna(strike):
         return "—"
     dist = (strike - spot) / spot * 100.0
-    return f"${strike:,.2f} ({dist:+.1f}%)"
+    return f"{fmt_strike(strike)} ({dist:+.1f}%)"
 
 
 def show_gex_strikes_of_interest(df: pd.DataFrame, spot: float) -> None:
@@ -38,18 +41,7 @@ def show_gex_strikes_of_interest(df: pd.DataFrame, spot: float) -> None:
     if df.empty or "gamma" not in df.columns:
         return
 
-    spot_sq = spot * spot
-    calls = df[df["type"] == "call"].copy()
-    puts = df[df["type"] == "put"].copy()
-    calls["gex"] = calls["gamma"] * calls["open_interest"] * 100 * spot_sq
-    puts["gex"] = -puts["gamma"] * puts["open_interest"] * 100 * spot_sq
-
-    per_strike = (
-        pd.concat([calls[["strike", "gex", "open_interest"]],
-                   puts[["strike", "gex", "open_interest"]]])
-        .groupby("strike", as_index=False)
-        .agg({"gex": "sum", "open_interest": "sum"})
-    )
+    per_strike = per_strike_gex(df, spot)
     if per_strike.empty or per_strike["gex"].abs().sum() == 0:
         return
 

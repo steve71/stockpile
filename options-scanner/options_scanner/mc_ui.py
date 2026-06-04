@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from options_scanner.format import fmt_strike
 from options_scanner.montecarlo import (
     Leg,
     Position,
@@ -209,7 +210,7 @@ def _path_chart(result: SimulationResult, position: Position) -> alt.Chart:
     for leg in position.legs:
         if leg.opt_type != "stock":
             refs.append({"y": leg.strike,
-                         "label": f"{leg.side[:1].upper()} {leg.opt_type[0].upper()} ${leg.strike:.0f}",
+                         "label": f"{leg.side[:1].upper()} {leg.opt_type[0].upper()} {fmt_strike(leg.strike)}",
                          "color": PALETTE["ink_3"]})
     # Suppress the breakeven line when the engine's bin-based estimate is
     # noisy (extreme one-sided distributions or near-zero values).

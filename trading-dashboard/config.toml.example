@@ -1,0 +1,46 @@
+# Trading dashboard — startup layout.
+#
+# Read each time the dashboard page loads. Defines how many panes are
+# shown and what each one opens with. Copy this file to `config.toml`
+# and edit; `config.toml` is gitignored so your layout stays local.
+# Edits take effect on a browser refresh — no server restart needed.
+
+# Panes visible on first load. One of: 1, 2, 4, 6, 8.
+chart_count = 4
+
+# Source used for any pane not listed below, and when a [[pane]] omits
+# `source`. One of: "yfinance", "schwab", "hyperliquid".
+default_source = "yfinance"
+
+# Ordered startup panes (up to 8). Each pane:
+#   source    = "yfinance" | "schwab" | "hyperliquid"
+#   symbol    = ticker, or crypto coin for hyperliquid (e.g. "ETH")
+#   timeframe = 1m, 3m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M
+[[pane]]
+source = "yfinance"
+symbol = "AVGO"
+timeframe = "1d"
+
+[[pane]]
+source = "yfinance"
+symbol = "NVDA"
+timeframe = "1d"
+
+[[pane]]
+source = "hyperliquid"
+symbol = "ETH"
+timeframe = "15m"
+
+[[pane]]
+source = "yfinance"
+symbol = "AMD"
+timeframe = "1h"
+
+# A "schwab" pane needs Schwab API credentials configured first
+# (options-scanner/config.toml — see options-scanner/SCHWAB_DATA_SOURCE.md).
+# Without that setup a Schwab pane just shows an error. Once configured,
+# add or swap one in like this:
+# [[pane]]
+# source = "schwab"
+# symbol = "AAPL"
+# timeframe = "1h"

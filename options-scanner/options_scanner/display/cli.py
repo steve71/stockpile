@@ -3,6 +3,7 @@
 from datetime import date, datetime, timedelta
 
 from options_scanner import iv_scores
+from options_scanner.format import fmt_strike
 
 
 def _fmt_exp(exp_str: str) -> str:
@@ -74,7 +75,7 @@ def print_results(
             earn_tag = f" {int(r['earnings_count'])}E" if r["earnings_count"] > 0 else ""
             last_v = r.get("last", 0) or 0
             row = {
-                "Strike": f"${r['strike']:.0f}",
+                "Strike": fmt_strike(r['strike']),
                 "Expiration": _fmt_exp(r["expiration"]) + earn_tag,
                 "DTE": int(r["dte"]),
                 "Bid": f"${r['bid']:.2f}",

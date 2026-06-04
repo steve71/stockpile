@@ -5,9 +5,10 @@ user drill into one ticker for the full GEX chart + strikes-of-
 interest table. Single-ticker mode skips the summary and goes
 straight to the chart.
 
-Scope is fixed to the 0–60 DTE chain across both calls and puts —
-GEX is most reliable on near-term OI; LEAPS GEX is too thin to be
-trusted and is excluded.
+DTE scope is user-set via Min/Max DTE inputs (default 0–60) across
+both calls and puts — GEX is most reliable on near-term OI; long-dated
+(LEAPS) gamma is thin. Note: 0DTE only flows through on Yahoo; the
+Schwab fetcher drops same-day expiries.
 
 This is diagnostic output, not a trade signal. See the README's
 Gamma Exposure section for caveats.
@@ -36,9 +37,9 @@ from options_scanner.ui_theme import metric_card
 
 
 def tab_gex() -> None:
-    """GEX-only scanner: fetch near-term chains (0–60 DTE) for one or
-    more tickers and surface dealer-gamma context (walls, amp zones,
-    zero-gamma flip).
+    """GEX-only scanner: fetch chains over the user-set DTE range
+    (default 0–60) for one or more tickers and surface dealer-gamma
+    context (walls, amp zones, gamma flip).
 
     Multi-ticker mode shows a summary table ranked by |Total GEX|;
     the user picks one ticker to drill into a full GEX chart and
@@ -48,7 +49,8 @@ def tab_gex() -> None:
     section for caveats.
     """
     with st.container(border=True):
-        tc, sc, expl = st.columns([2, 1, 4], vertical_alignment="bottom")
+        tc, dlo, dhi, sc, expl = st.columns(
+            [2, 1, 1, 1, 3], vertical_alignment="bottom")
         with tc:
             tickers_input = st.text_input(
                 "Ticker(s) — comma-separated",
@@ -59,6 +61,19 @@ def tab_gex() -> None:
                     "Multi-ticker mode adds a summary table you can "
                     "sort, then drill into one ticker for the full chart."
                 ),
+            )
+        with dlo:
+            min_dte = st.number_input(
+                "Min DTE", value=0, min_value=0, step=1, key="g_min_dte",
+                help="Lowest days-to-expiration to include. 0 = same-day "
+                     "expiries (0DTE carry the most dealer gamma). Note: "
+                     "0DTE only flows through on Yahoo — Schwab drops them.",
+            )
+        with dhi:
+            max_dte = st.number_input(
+                "Max DTE", value=60, min_value=1, step=1, key="g_max_dte",
+                help="Highest days-to-expiration to include. GEX is most "
+                     "reliable near-term; long-dated (LEAPS) gamma is thin.",
             )
         with sc:
             with st.container(key="gex_scan_btn_lift"):
@@ -86,7 +101,7 @@ def tab_gex() -> None:
                 "strikes-of-interest table with three key levels: "
                 "<b>Gamma Wall</b> (largest positive GEX — price tends to pin here), "
                 "<b>Amp Zone</b> (largest negative GEX — moves tend to accelerate), "
-                "and <b>Zero-gamma level</b> (the flip point where the regime "
+                "and <b>Gamma flip</b> (the zero-gamma level where the regime "
                 "switches from pinning to amplifying). "
                 "Diagnostic context, not a directional signal."
                 "</div>"
@@ -96,9 +111,9 @@ def tab_gex() -> None:
             )
 
     st.caption(
-        "Scans the **0–60 DTE** chain across both calls and puts. "
-        "GEX is most reliable on near-term chains where OI is dense; "
-        "LEAPS GEX is too thin to interpret and is excluded."
+        f"Scans the **{int(min_dte)}–{int(max_dte)} DTE** chain across "
+        "both calls and puts. GEX is most reliable on near-term chains "
+        "where OI is dense; long-dated (LEAPS) gamma is thin and noisier."
     )
 
     if scanned or st.session_state.pop("_gex_rescan_trigger", False):
@@ -114,6 +129,10 @@ def tab_gex() -> None:
             st.error("Enter one or more ticker symbols.")
             st.session_state.pop("gex_results", None)
             return
+        if int(max_dte) < int(min_dte):
+            st.error(f"Max DTE ({int(max_dte)}) must be ≥ Min DTE "
+                     f"({int(min_dte)}).")
+            return
 
         per_ticker: dict[str, dict] = {}
         failed: list[tuple[str, str]] = []
@@ -126,7 +145,7 @@ def tab_gex() -> None:
                 text=f"Fetching {t} ({i}/{len(tickers)})…",
             )
             df, earnings, err = fetch_and_enrich(
-                t, "both", 0, 60,
+                t, "both", int(min_dte), int(max_dte),
                 st.session_state.get("data_source", "yahoo"),
                 st.session_state.get("schwab_config"),
                 moomoo_config=st.session_state.get("moomoo_config"),
@@ -135,7 +154,8 @@ def tab_gex() -> None:
                 failed.append((t, err))
                 continue
             if df.empty:
-                failed.append((t, "no options in 0–60 DTE"))
+                failed.append((t, f"no options in {int(min_dte)}–"
+                                  f"{int(max_dte)} DTE"))
                 continue
             spot = float(df["spot"].iloc[0])
             summary = compute_gex_summary(df, spot)
@@ -160,6 +180,8 @@ def tab_gex() -> None:
         st.session_state["gex_results"] = {
             "tickers": list(per_ticker.keys()),
             "per_ticker": per_ticker,
+            "min_dte": int(min_dte),
+            "max_dte": int(max_dte),
         }
 
     res = st.session_state.get("gex_results")
@@ -180,7 +202,7 @@ def tab_gex() -> None:
             "Spot":      spot,
             "Total GEX": info["total_gex"],
             "Regime":    info["regime"],
-            "Zero-Γ":    fmt_strike_with_dist(info["zero_gamma"], spot),
+            "Gamma flip": fmt_strike_with_dist(info["zero_gamma"], spot),
             "Top Wall":  fmt_strike_with_dist(info["top_wall"], spot),
             "Top Amp":   fmt_strike_with_dist(info["top_amp"], spot),
         })
@@ -205,7 +227,7 @@ def tab_gex() -> None:
         st.subheader("GEX summary")
         st.caption(
             "One row per ticker, sorted by absolute Total GEX (most "
-            "dealer-gamma exposure first). The Zero-Γ, Top Wall, and "
+            "dealer-gamma exposure first). The Gamma flip, Top Wall, and "
             "Top Amp cells include each strike's distance from spot."
         )
         st.dataframe(
@@ -215,7 +237,7 @@ def tab_gex() -> None:
                 "Spot":      st.column_config.NumberColumn(format="$%.2f"),
                 "Total GEX": st.column_config.NumberColumn(format="%,.0f"),
                 "Regime":    st.column_config.TextColumn(),
-                "Zero-Γ":    st.column_config.TextColumn(),
+                "Gamma flip": st.column_config.TextColumn(),
                 "Top Wall":  st.column_config.TextColumn(),
                 "Top Amp":   st.column_config.TextColumn(),
             },
@@ -247,7 +269,8 @@ def tab_gex() -> None:
         with m2:
             metric_card("EXPIRATIONS",
                         f"{df_r['expiration'].nunique()}",
-                        help_text="0–60 DTE")
+                        help_text=f"{res.get('min_dte', 0)}–"
+                                  f"{res.get('max_dte', 60)} DTE")
         with m3:
             _earnings = info.get("earnings_dates") or []
             if _earnings:

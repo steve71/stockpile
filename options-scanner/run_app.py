@@ -29,7 +29,7 @@ from options_scanner.tabs.spreads import tab_directional, tab_neutral, tab_sprea
 
 _FAVICON_PATH = Path(__file__).parent / "assets" / "favicon.png"
 st.set_page_config(
-    page_title="Options Scanner — Stockpile",
+    page_title="Scanner",
     page_icon=str(_FAVICON_PATH) if _FAVICON_PATH.exists() else "•",
     layout="wide",
     initial_sidebar_state="collapsed",
