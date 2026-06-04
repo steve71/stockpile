@@ -3,17 +3,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: stockpile-options-scanner:latest
+    image: stockpile:latest
     container_name: options-scanner
     ports:
       - "8501:8501"
     volumes:
       # Mount your configuration (ensure you've created config.toml from the example first)
       - ./options-scanner/config.toml:/app/options-scanner/config.toml
-      
+
       # Mount your brokerage CSV folder as read-only for the Portfolio tab
       - ./input:/app/input:ro
-      
+
       # Mount the output folder to access generated HTML reports on the host
       - ./options-scanner/output:/app/options-scanner/output
 
@@ -22,9 +22,29 @@ services:
 
     restart: unless-stopped
 
-    # Streamlit healthcheck using internal Python libraries (avoids needing curl in the image)
     healthcheck:
       test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8501/_stcore/health\")'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  trading-dashboard:
+    image: stockpile:latest
+    container_name: trading-dashboard
+    ports:
+      - "5000:5000"
+    volumes:
+      # Mount your configuration (copy config.toml.example → config.toml first)
+      - ./trading-dashboard/config.toml:/app/trading-dashboard/config.toml
+
+      # Optional: Uncomment if you use Schwab live quotes
+      # - ~/.config/schwab-token.json:/root/.config/schwab-token.json
+
+    command: ["uv", "run", "--no-sync", "trading-dashboard/app.py"]
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:5000/\")'"]
       interval: 30s
       timeout: 10s
       retries: 3

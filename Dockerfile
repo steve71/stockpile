@@ -14,6 +14,7 @@ ENV UV_COMPILE_BYTECODE=1
 COPY pyproject.toml uv.lock ./
 COPY shared/ ./shared/
 COPY options-scanner/ ./options-scanner/
+COPY trading-dashboard/ ./trading-dashboard/
 
 # Install dependencies first (better caching)
 # `--frozen` ensures we use the exact versions from uv.lock.
@@ -23,9 +24,6 @@ COPY options-scanner/ ./options-scanner/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# Streamlit runs on 8501 by default
+# Default: options scanner on 8501. Override CMD in docker-compose for other services.
 EXPOSE 8501
-
-# Run the app
-# --server.address=0.0.0.0 is required for Docker to allow external access
-ENTRYPOINT ["uv", "run", "--no-sync", "streamlit", "run", "options-scanner/run_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["uv", "run", "--no-sync", "streamlit", "run", "options-scanner/run_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
