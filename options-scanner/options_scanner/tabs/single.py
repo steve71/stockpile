@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner.compute.top_ranks import compute_top_ranks
+from options_scanner.defaults import default_delta_range
 from options_scanner.display.chain_table import show_chain_table
 from options_scanner.display.gex_chart import show_gex_chart
 from options_scanner.display.iv_chart import show_iv_chart
@@ -39,7 +40,9 @@ from options_scanner import iv_algorithms, iv_scores
 from options_scanner.iv_filters import DEFAULT_CONFIG as FILTER_DEFAULT, SurfaceFilterConfig
 from options_scanner.mc_ui import position_from_chain_row, render_mc_panel
 from options_scanner.recent_scans import build_label, load as load_recent, save as save_recent
-from options_scanner.ui_theme import badge, empty_state, metric_card, section_header
+from options_scanner.ui_theme import (
+    badge, empty_state, metric_card, render_schwab_reauth_hint, section_header,
+)
 
 
 # Surface-fit presets — shared by the preset pill and the advanced section
@@ -177,6 +180,13 @@ def tab_single() -> None:
             with rc3:
                 roll_exp = st.date_input("Current expiration", key="s_roll_exp")
         else:
+            def _sync_s_delta() -> None:
+                """Reset the delta band to the new direction's default when the
+                Sell/Buy toggle flips. A range nudged within a direction sticks;
+                flipping direction re-seeds it (sell ≈ OTM, buy ≈ near-ATM)."""
+                _b = st.session_state.get("s_action", "").startswith("Buy")
+                st.session_state["s_delta"] = default_delta_range(_b)
+
             a1, a2, a3 = st.columns([2.2, 1.8, 3.0])
             with a1:
                 action = st.radio(
@@ -184,6 +194,7 @@ def tab_single() -> None:
                     ["Sell (IV-rich candidates)", "Buy (IV-cheap candidates)"],
                     horizontal=True,
                     key="s_action",
+                    on_change=_sync_s_delta,
                 )
                 buy = action.startswith("Buy")
             with a2:
@@ -215,7 +226,8 @@ def tab_single() -> None:
             )
         with n5:
             delta_range = st.slider("Delta Range (abs value)", 0.0, 1.0,
-                                    (0.10, 0.50), step=0.05, key="s_delta")
+                                    default_delta_range(False), step=0.05,
+                                    key="s_delta")
         with n6:
             top_n = st.number_input("Top N", value=10, min_value=1,
                                     max_value=50, key="s_top")
@@ -390,6 +402,7 @@ def tab_single() -> None:
 
         if err:
             st.error(f"**{ticker_clean}:** {err}")
+            render_schwab_reauth_hint(st.session_state.get("data_source", "yahoo"))
             st.session_state.pop("single_results", None)
             st.stop()
         if df.empty:

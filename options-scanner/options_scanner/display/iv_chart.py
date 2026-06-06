@@ -23,7 +23,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner.compute.top_ranks import compute_top_ranks
-from options_scanner.format import STRIKE_D3_FORMAT
+from options_scanner.format import STRIKE_D3_FORMAT, strike_tick_values
 from options_scanner.display.scan_stamp import scan_stamp_color, scan_stamp_text
 from options_scanner.display.iv_surface_3d import render_iv_surface_3d
 
@@ -294,7 +294,10 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     base_x = alt.X(
         "strike:Q", title="Strike",
         scale=alt.Scale(domain=[x_min, x_max]),
-        axis=alt.Axis(format=STRIKE_D3_FORMAT),
+        axis=alt.Axis(
+            format=STRIKE_D3_FORMAT,
+            values=strike_tick_values(sub["strike"], x_min, x_max) or alt.Undefined,
+        ),
     )
     y_scale = alt.Scale(domain=[y_min, y_max])
     base_y = alt.Y("IV%:Q", title="Implied Volatility (%)", scale=y_scale)
@@ -519,7 +522,10 @@ def _render_all_expirations(frame: pd.DataFrame, spot: float,
     base_x = alt.X(
         "strike:Q", title="Strike",
         scale=alt.Scale(domain=[x_min, x_max]),
-        axis=alt.Axis(format=STRIKE_D3_FORMAT),
+        axis=alt.Axis(
+            format=STRIKE_D3_FORMAT,
+            values=strike_tick_values(frame["strike"], x_min, x_max) or alt.Undefined,
+        ),
     )
     y_enc = alt.Y("FittedIV%:Q", title="Fitted IV (%)",
                   scale=alt.Scale(domain=[y_min, y_max]))

@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner.compute.gex_summary import per_strike_gex, gamma_flip_strike
-from options_scanner.format import STRIKE_D3_FORMAT
+from options_scanner.format import STRIKE_D3_FORMAT, strike_tick_values
 from options_scanner.display.scan_stamp import scan_stamp_color, scan_stamp_text
 
 
@@ -113,10 +113,28 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
         gex_zoomed = gex
     y_max_gex = float(gex_zoomed["gex"].max())
 
-    bars = alt.Chart(gex_zoomed).mark_bar(opacity=0.85).encode(
+    # Interactive x-axis zoom: scroll/drag to zoom the strike axis so more
+    # strikes (incl. .5s) label as you zoom in. Bound to scales, x only, so
+    # the bars keep their vertical scale. No explicit scale `domain` on the
+    # layers (an explicit domain would override and disable the zoom), and no
+    # `value` init on the selection (a scales-bound init leaves the binding
+    # inert). The initial view is pinned to the core window [x_min, x_max] by
+    # a transparent anchor layer (xspan) that just widens the auto-domain. Any
+    # Streamlit rerun redraws to this default view.
+    x_zoom = alt.selection_interval(bind="scales", encodings=["x"])
+    xspan = alt.Chart(pd.DataFrame({"x": [x_min, x_max]})).mark_rule(
+        opacity=0).encode(x="x:Q")
+
+    bars = alt.Chart(gex_zoomed).mark_bar(opacity=0.85, clip=True).encode(
         x=alt.X("strike:Q", title="Strike",
-                scale=alt.Scale(domain=[x_min, x_max]),
-                axis=alt.Axis(format=STRIKE_D3_FORMAT)),
+                scale=alt.Scale(nice=False),
+                axis=alt.Axis(
+                    format=STRIKE_D3_FORMAT,
+                    # All core strikes as candidate ticks; labelOverlap thins
+                    # them at the default view and zooming in reveals more.
+                    values=strike_tick_values(gex_zoomed["strike"], max_ticks=1000)
+                    or alt.Undefined,
+                    labelOverlap="greedy")),
         y=alt.Y("gex:Q", title="Net GEX ($)"),
         color=alt.Color("color:N",
                         scale=alt.Scale(
@@ -136,13 +154,13 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
     spot_rule = alt.Chart(spot_df).mark_rule(
         color="#0f172a", strokeDash=[3, 3], strokeWidth=1.5,
     ).encode(
-        x=alt.X("x:Q", scale=alt.Scale(domain=[x_min, x_max])),
+        x=alt.X("x:Q"),
     )
     spot_label = alt.Chart(spot_df).mark_text(
         align="left", baseline="top", dx=5, dy=2,
         color="#0f172a", fontWeight="bold", fontSize=11,
     ).encode(
-        x=alt.X("x:Q", scale=alt.Scale(domain=[x_min, x_max])),
+        x=alt.X("x:Q"),
         y="y:Q",
         text="label:N",
     )
@@ -161,13 +179,13 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
         flip_rule = alt.Chart(flip_df).mark_rule(
             color="#7c3aed", strokeDash=[6, 3], strokeWidth=1.5, clip=True,
         ).encode(
-            x=alt.X("x:Q", scale=alt.Scale(domain=[x_min, x_max])),
+            x=alt.X("x:Q"),
         )
         flip_label = alt.Chart(flip_df).mark_text(
             align="left", baseline="top", dx=5, dy=16,
             color="#7c3aed", fontWeight="bold", fontSize=11, clip=True,
         ).encode(
-            x=alt.X("x:Q", scale=alt.Scale(domain=[x_min, x_max])),
+            x=alt.X("x:Q"),
             y="y:Q",
             text="label:N",
         )
@@ -190,7 +208,9 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
     else:
         dte_note = "Aggregated across all expirations in the current scan."
 
-    chart = alt.layer(bars, spot_rule, spot_label, *flip_layers)
+    chart = alt.layer(
+        bars, spot_rule, spot_label, *flip_layers, xspan
+    ).add_params(x_zoom)
     st.altair_chart(
         chart.properties(
             height=240,
@@ -205,6 +225,9 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
         ).configure_view(strokeWidth=0),
         width='stretch',
     )
+
+    st.caption("Scroll or drag on the chart to zoom the strike axis — more "
+               "strikes label as you zoom in. Rescan to reset the view.")
 
     provider_caveat = (
         "GEX estimated from Black-Scholes gamma (Yahoo IV may be stale on LEAPS)."

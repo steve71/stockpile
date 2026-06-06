@@ -81,6 +81,9 @@ button:hover{background:rgba(255,255,255,.07)}
   background:rgba(12,17,29,.55);z-index:5;
   color:var(--muted);font-size:.84rem;text-align:center}
 .pane.loading .loader{display:grid}
+.pane.error .loader{display:grid}
+.pane-error{color:var(--red);max-width:90%;line-height:1.45;
+  word-break:break-word;padding:0 .6rem}
 .spinner{width:22px;height:22px;border-radius:50%;
   border:2px solid var(--border);border-top-color:var(--primary);
   animation:spin .7s linear infinite}

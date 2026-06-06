@@ -26,6 +26,7 @@ from options_scanner.display.scan_stamp import stamp_caption
 def build_leaderboard(results: list[dict], side: str, min_oi: int,
                       top_n: int, min_vol: int = 0,
                       delta_range: tuple[float, float] | None = None,
+                      buy: bool = False,
                       ) -> pd.DataFrame:
     """Collect a "best per ticker, then fill" leaderboard for one side.
 
@@ -63,7 +64,7 @@ def build_leaderboard(results: list[dict], side: str, min_oi: int,
         if sub.empty:
             continue
         sub = (sub.sort_values([sort_col_for(sub), "open_interest"],
-                               ascending=[False, False])
+                               ascending=[buy, False])
                .head(top_n).copy())
         sub["ticker"] = res["position"]["ticker"]
         sub["_is_ticker_top"] = [True] + [False] * (len(sub) - 1)
@@ -83,27 +84,30 @@ def build_leaderboard(results: list[dict], side: str, min_oi: int,
     if leftovers:
         pool = pd.concat(leftovers, ignore_index=True)
         sc = sort_col_for(pool)
-        pool = pool.sort_values([sc, "open_interest"], ascending=[False, False])
+        pool = pool.sort_values([sc, "open_interest"], ascending=[buy, False])
         fill = pool.head(max(0, target - len(guaranteed)))
         combined = pd.concat([guaranteed, fill], ignore_index=True)
     else:
         combined = guaranteed
 
-    # 3. Final display sort by IV+pp (richest first).
+    # 3. Final display sort by signal (richest first when selling, cheapest
+    #    first when buying).
     sc = sort_col_for(combined)
     combined = (combined.sort_values([sc, "open_interest"],
-                                     ascending=[False, False])
+                                     ascending=[buy, False])
                 .head(target).reset_index(drop=True))
     return combined
 
 
 def render_leaderboard(results: list[dict], mode: str, min_oi: int,
                        top_n: int, min_vol: int = 0,
-                       delta_range: tuple[float, float] | None = None) -> None:
+                       delta_range: tuple[float, float] | None = None,
+                       buy: bool = False) -> None:
     """Render the cross-ticker leaderboard table(s).
 
     `mode` is "call", "put", or "both" (both renders a Calls and a Puts
-    leaderboard). No-op when nothing qualifies on a side.
+    leaderboard). `buy` flips the ranking so IV-cheap contracts float to
+    the top. No-op when nothing qualifies on a side.
     """
     sides = [mode] if mode in ("call", "put") else ["call", "put"]
     headings = {"call": "Calls", "put": "Puts"}
@@ -111,7 +115,7 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
     rendered_any = False
     for side in sides:
         board = build_leaderboard(results, side, min_oi, top_n, min_vol,
-                                  delta_range)
+                                  delta_range, buy)
         if board.empty:
             continue
         rendered_any = True

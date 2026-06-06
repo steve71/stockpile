@@ -31,9 +31,12 @@ from options_scanner.display.spot_meta import (
     spot_help_text,
     spot_value_html,
 )
+from options_scanner.defaults import default_delta_range
 from options_scanner.fetch import fetch_position
 from options_scanner.portfolio import detect_brokerage
-from options_scanner.ui_theme import badge, metric_card, section_header
+from options_scanner.ui_theme import (
+    badge, metric_card, render_schwab_reauth_hint, section_header,
+)
 from options_scanner import watchlists
 
 
@@ -305,6 +308,9 @@ def tab_portfolio() -> None:
             st.session_state["p_delta"]    = (_dmin, _dmax)
             st.session_state["p_top"]      = max(1, int(entry.get("top_n", 5)))
             st.session_state["p_opt_type"] = entry.get("option_type", "Calls")
+            st.session_state["p_action"] = (
+                "Buy (IV-cheap candidates)" if entry.get("buy")
+                else "Sell (IV-rich candidates)")
             # Reset to placeholder (allowed inside on_change) so the same
             # pick can be re-applied later after manual edits.
             st.session_state["p_wl_saved"] = _wl_placeholder
@@ -351,6 +357,7 @@ def tab_portfolio() -> None:
                     "delta_min": float(_d[0]),
                     "delta_max": float(_d[1]),
                     "top_n": int(st.session_state.get("p_top", 5)),
+                    "buy": st.session_state.get("p_action", "").startswith("Buy"),
                 })
                 st.session_state["_wl_flash"] = (
                     f"{'Updated' if _was_update else 'Saved'} watchlist "
@@ -428,7 +435,8 @@ def tab_portfolio() -> None:
         port_min_vol = st.number_input("Min Vol", value=1, min_value=0,
                                        key="p_min_vol")
     with pc5:
-        port_delta_range = st.slider("Delta Range", 0.0, 1.0, (0.10, 0.70),
+        port_delta_range = st.slider("Delta Range", 0.0, 1.0,
+                                     default_delta_range(False),
                                      0.05, key="p_delta")
     with pc6:
         port_top = st.number_input("Top N per ticker", value=5, min_value=1,
@@ -437,14 +445,35 @@ def tab_portfolio() -> None:
     # ── Controls row 2: scan semantics ───────────────────────────────────────
     # Watchlist mode is best-option only over a typed basket, so Scan mode
     # and the position-scope checkboxes (which are about CSV positions) hide.
+    # The Sell/Buy toggle lives here too (watchlist only) — buying puts to
+    # short, or calls across a basket. The CSV path stays sell-only.
     if is_watchlist:
-        opt_type_label = st.radio(
-            "Option type", ["Calls", "Puts", "Both"],
-            horizontal=True, key="p_opt_type",
-        )
+        def _sync_p_delta() -> None:
+            """Re-seed the delta band to the new direction's default on a
+            Sell/Buy flip (sell ≈ OTM, buy ≈ near-ATM)."""
+            _b = st.session_state.get("p_action", "").startswith("Buy")
+            st.session_state["p_delta"] = default_delta_range(_b)
+
+        wc1, wc2 = st.columns([2.2, 1.8])
+        with wc1:
+            direction_label = st.radio(
+                "Direction",
+                ["Sell (IV-rich candidates)", "Buy (IV-cheap candidates)"],
+                horizontal=True, key="p_action", on_change=_sync_p_delta,
+                help="Sell: rank IV-rich premium to write. Buy: rank IV-cheap "
+                     "contracts to buy — e.g. puts to short a name, or calls "
+                     "across the basket.",
+            )
+        with wc2:
+            opt_type_label = st.radio(
+                "Option type", ["Calls", "Puts", "Both"],
+                horizontal=True, key="p_opt_type",
+            )
+        buy = direction_label.startswith("Buy")
         scan_mode_label = "Best option"
         scope_open = scope_stock = scope_closed = True
     else:
+        buy = False
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
             opt_type_label = st.radio(
@@ -480,6 +509,7 @@ def tab_portfolio() -> None:
         brokerage,
         opt_type_key,
         scan_mode_key,
+        buy,
         scope_open, scope_stock, scope_closed,
         int(port_min_dte),
         int(port_max_dte),
@@ -582,6 +612,7 @@ def tab_portfolio() -> None:
             "uploaded_name": source_name,
             "opt_type": opt_type_key,
             "scan_mode": scan_mode_key,
+            "buy": buy,
         }
 
     # ── Render stored results (survives widget interactions / re-runs) ────────
@@ -593,7 +624,13 @@ def tab_portfolio() -> None:
     uploaded_name    = stored["uploaded_name"]
     stored_opt_type  = stored.get("opt_type", "calls")
     stored_scan_mode = stored.get("scan_mode", "roll")
+    stored_buy       = stored.get("buy", False)
     stored_side      = {"calls": "call", "puts": "put", "both": "both"}[stored_opt_type]
+
+    # If any ticker failed and the source is Schwab, the saved token has
+    # likely expired — surface the re-auth fix once, above the results.
+    if any(r.get("error") for r in results):
+        render_schwab_reauth_hint(st.session_state.get("scan_provider", "yahoo"))
 
     # ── Cross-ticker leaderboard — richest IV+pp across the whole basket ──────
     if len(results) > 1:
@@ -604,7 +641,7 @@ def tab_portfolio() -> None:
         )
         render_leaderboard(results, stored_side, int(port_min_oi),
                            int(port_top), int(port_min_vol),
-                           delta_range=port_delta_range)
+                           delta_range=port_delta_range, buy=stored_buy)
 
     for res in results:
         pos    = res["position"]
@@ -699,6 +736,7 @@ def tab_portfolio() -> None:
                     min_oi=int(port_min_oi),
                     min_vol=int(port_min_vol),
                     opt_type="calls",
+                    buy=stored_buy,
                 )
 
             if stored_opt_type in ("puts", "both"):
@@ -720,10 +758,11 @@ def tab_portfolio() -> None:
                     min_oi=int(port_min_oi),
                     min_vol=int(port_min_vol),
                     opt_type="puts",
+                    buy=stored_buy,
                 )
 
             show_iv_chart(df_filt, spot, stored_side,
-                           int(port_min_oi), int(port_top), False,
+                           int(port_min_oi), int(port_top), stored_buy,
                            ticker=ticker, key_prefix=f"p_{ticker}",
                            min_vol=int(port_min_vol),
                            provider=st.session_state.get("scan_provider", "yahoo"))
@@ -742,7 +781,7 @@ def tab_portfolio() -> None:
                     )
 
             st.markdown("**Top candidates**")
-            show_scan_results(df_filt, stored_side, False, _table_roll_close,
+            show_scan_results(df_filt, stored_side, stored_buy, _table_roll_close,
                                int(port_min_oi), int(port_top),
                                int(port_min_vol))
 
@@ -751,7 +790,7 @@ def tab_portfolio() -> None:
     port_html = render_portfolio_html(
         results, uploaded_name, int(port_min_oi), int(port_top),
         int(port_min_vol), opt_type=stored_opt_type,
-        delta_range=port_delta_range,
+        delta_range=port_delta_range, buy=stored_buy,
     )
     st.download_button(
         "⬇ Download Portfolio Report",

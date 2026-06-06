@@ -27,3 +27,26 @@ def fmt_strike(strike) -> str:
     if x.is_integer():
         return f"${x:,.0f}"
     return f"${x:,.2f}".rstrip("0").rstrip(".")
+
+
+def strike_tick_values(strikes, lo=None, hi=None, max_ticks=16):
+    """Axis tick positions aligned to the real option strikes.
+
+    Vega-Lite's automatic ticks land on "nice" round steps (1, 2, 5, …), so
+    $0.50-/$2.50-wide strikes (7.5, 152.5) never get a labeled tick. Passing
+    the actual strikes as the axis `values` forces ticks onto them.
+
+    Restricts to the [lo, hi] domain when given and thins uniformly to at
+    most `max_ticks` so wide chains don't crowd the axis (the kept ticks are
+    still real strikes). Returns an empty list when there are no strikes, so
+    callers can fall back to Vega's default ticks.
+    """
+    vals = sorted({round(float(s), 4) for s in strikes if s is not None})
+    if lo is not None:
+        vals = [v for v in vals if v >= lo - 1e-9]
+    if hi is not None:
+        vals = [v for v in vals if v <= hi + 1e-9]
+    if len(vals) > max_ticks:
+        step = -(-len(vals) // max_ticks)   # ceil division
+        vals = vals[::step]
+    return vals

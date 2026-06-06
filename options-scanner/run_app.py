@@ -23,6 +23,7 @@ from options_scanner.ui_theme import (
 )
 from options_scanner.display.scan_stamp import PROVIDER_LABELS, PROVIDER_COLORS
 from options_scanner.tabs.gex import tab_gex
+from options_scanner.tabs.live_charts import tab_live_charts
 from options_scanner.tabs.portfolio import tab_portfolio
 from options_scanner.tabs.single import tab_single
 from options_scanner.tabs.spreads import tab_directional, tab_neutral, tab_spreads
@@ -295,9 +296,10 @@ st.markdown(
 (
     panel_single, panel_gex, panel_portfolio,
     panel_spreads, panel_directional, panel_neutral,
+    panel_live,
 ) = st.tabs(
     ["Single Ticker", "GEX", "Portfolio",
-     "Spreads", "Directional", "Neutral"]
+     "Spreads", "Directional", "Neutral", "Live Charts"]
 )
 
 with panel_single:
@@ -317,6 +319,9 @@ with panel_directional:
 
 with panel_neutral:
     tab_neutral()
+
+with panel_live:
+    tab_live_charts()
 
 # ── Footer ───────────────────────────────────────────────────────────────
 ui_footer()

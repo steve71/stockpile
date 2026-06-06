@@ -178,6 +178,7 @@ function updateTicker(id, symbol, price, changePct, dir) {
   const sign = changePct >= 0 ? '+' : '';
   d.textContent = Number.isFinite(changePct) ? `${sign}${changePct.toFixed(2)}%` : '--';
   d.className = `delta ${dir > 0 ? 'up' : dir < 0 ? 'down' : 'flat'}`;
+  d.title = '';  // clear any stale error tooltip from a prior failure
   const t = pane.querySelector('.ticker-inline');
   t.classList.remove('flash-up', 'flash-down');
   void t.offsetWidth;
@@ -275,6 +276,7 @@ async function initPane(paneId) {
   if (!ps || !pane) return;
   destroyPane(paneId);
   pane.classList.add('loading');
+  pane.classList.remove('error');
   const loaderEl = pane.querySelector('.loader');
   loaderEl.innerHTML = '<div class="spinner"></div><span>Loading…</span>';
   const chartEl = pane.querySelector('.chart-el');
@@ -317,11 +319,14 @@ async function initPane(paneId) {
   } catch (err) {
     console.error(`[Pane ${paneId}]`, err);
     const _err = document.createElement('span');
-    _err.style.color = 'var(--red)';
+    _err.className = 'pane-error';
     _err.textContent = `⚠ ${err.message}`;
     loaderEl.replaceChildren(_err);
+    // Keep the loader overlay visible in an error state — without this the
+    // message lands in a hidden element once `loading` is removed below.
+    pane.classList.add('error');
     const d = pane.querySelector('.delta');
-    if (d) { d.textContent = 'Error'; d.className = 'delta down'; }
+    if (d) { d.textContent = 'Error'; d.className = 'delta down'; d.title = err.message; }
   } finally {
     pane.classList.remove('loading');
   }

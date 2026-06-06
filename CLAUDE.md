@@ -35,8 +35,11 @@ to `cost-basis-charts/output/`.
 uv run streamlit run options-scanner/run_app.py
 ```
 
-Opens at `http://localhost:8501`. Single Ticker tab or Portfolio tab
-(drag in a brokerage CSV).
+Opens at `http://localhost:8501` with tabs for Single Ticker, GEX,
+Portfolio, Spreads/Directional/Neutral, and **Live Charts** (the trading
+dashboard, embedded). To launch the scanner **and** the dashboard together
+(so Live Charts is populated), run `uv run run.py` from the repo root
+instead.
 
 ### Options scanner — CLI (single ticker)
 
@@ -68,7 +71,10 @@ stocks, **Hyperliquid** for crypto. Schwab bars + real-time mark reuse
 `stocks_shared.schwab_live` and the **shared** `[schwab]` credentials
 in `options-scanner/config.toml` (same `~/.config/schwab-token.json`,
 7-day token TTL — re-run `schwab_auth.py` if Schwab quotes go empty).
-`run.cmd` / `run.sh` wrap the same `uv run`.
+`run.cmd` / `run.sh` wrap the same `uv run`. The scanner embeds this
+dashboard as its **Live Charts** tab; `uv run run.py` from the repo root
+launches both together (Flask :5000 + Streamlit :8501), and :5000 stays
+directly reachable too.
 
 ## Project structure
 

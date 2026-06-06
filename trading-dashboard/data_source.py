@@ -66,31 +66,39 @@ def fetch_hyperliquid(symbol: str, interval: str, limit: int = 200) -> list:
 
 # Schwab credentials are shared with the options-scanner — one setup per repo.
 _SCHWAB_CONFIG_PATH = Path(__file__).resolve().parents[1] / "options-scanner" / "config.toml"
-_schwab_client = None
+# Parsed Schwab config, read once: (app_key, app_secret, callback_url,
+# token_file). The client itself is cached by stocks_shared.schwab_live.
+# get_client, which rebuilds it when the token file changes — so re-running
+# schwab_auth.py is picked up without restarting the dashboard.
+_schwab_cfg: tuple | None = None
 
 def _get_schwab_client():
-    """Build (and cache) the shared Schwab client from the scanner's config."""
-    global _schwab_client
-    if _schwab_client is not None:
-        return _schwab_client
-    if not _SCHWAB_CONFIG_PATH.exists():
-        raise ValueError(f"Schwab config not found at {_SCHWAB_CONFIG_PATH}. "
-                         "First-time setup: options-scanner/SCHWAB_DATA_SOURCE.md")
-    with open(_SCHWAB_CONFIG_PATH, "rb") as f:
-        cfg = tomllib.load(f).get("schwab", {})
-    app_key, app_secret = cfg.get("app_key", ""), cfg.get("app_secret", "")
-    if (not app_key or app_key.startswith("your-")
-            or not app_secret or app_secret.startswith("your-")):
-        raise ValueError("Schwab app_key/app_secret not set in "
-                         "options-scanner/config.toml. First-time setup: "
-                         "options-scanner/SCHWAB_DATA_SOURCE.md")
+    """Return the shared Schwab client, built from the scanner's config.
+
+    The config is parsed once; the client is cached (and refreshed after a
+    re-auth) by stocks_shared.schwab_live.get_client, so we call through to
+    it every time rather than holding our own client reference.
+    """
+    global _schwab_cfg
+    if _schwab_cfg is None:
+        if not _SCHWAB_CONFIG_PATH.exists():
+            raise ValueError(f"Schwab config not found at {_SCHWAB_CONFIG_PATH}. "
+                             "First-time setup: options-scanner/SCHWAB_DATA_SOURCE.md")
+        with open(_SCHWAB_CONFIG_PATH, "rb") as f:
+            cfg = tomllib.load(f).get("schwab", {})
+        app_key, app_secret = cfg.get("app_key", ""), cfg.get("app_secret", "")
+        if (not app_key or app_key.startswith("your-")
+                or not app_secret or app_secret.startswith("your-")):
+            raise ValueError("Schwab app_key/app_secret not set in "
+                             "options-scanner/config.toml. First-time setup: "
+                             "options-scanner/SCHWAB_DATA_SOURCE.md")
+        _schwab_cfg = (
+            app_key, app_secret,
+            cfg.get("callback_url", "https://127.0.0.1:8182/"),
+            cfg.get("token_file", "~/.config/schwab-token.json"),
+        )
     from stocks_shared.schwab_live import get_client
-    _schwab_client = get_client(
-        app_key, app_secret,
-        cfg.get("callback_url", "https://127.0.0.1:8182/"),
-        cfg.get("token_file", "~/.config/schwab-token.json"),
-    )
-    return _schwab_client
+    return get_client(*_schwab_cfg)
 
 def fetch_schwab(symbol: str, interval: str, limit: int = 200) -> list:
     # Authenticated brokerage API — no shared-session rate limiting needed.

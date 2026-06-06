@@ -93,10 +93,70 @@ scan fails silently and surfaces as:
 Could not fetch live price for AAPL from Schwab
 ```
 
-The fix is just to re-run `schwab_auth.py` (which wipes the old
-token file and walks you through the browser login again). Restart
-any running Streamlit server afterward so the cached Schwab client
-picks up the new token.
+The fix is just to re-run `schwab_auth.py` (which wipes the old token
+file and walks you through the login again). The scanner and the trading
+dashboard pick up the refreshed token automatically on the next request —
+no server restart needed.
+
+### Headless / remote host (no browser)
+
+On a remote or cloud host where `schwab_auth.py` can't open a browser,
+use the manual flow:
+
+```bash
+uv run options-scanner/schwab_auth.py --manual
+```
+
+1. It prints a **login URL**. Open it in a browser on any machine and log
+   in to your Schwab **brokerage** account (not the developer account),
+   then approve access.
+2. Your browser redirects to your callback URL
+   (`https://127.0.0.1:8182/?code=…`) and shows a **connection error** —
+   that's expected, since nothing is listening there.
+3. Copy the **entire** URL from the address bar (it contains
+   `?code=…&session=…`) and paste it at the `Redirect URL (hidden)>`
+   prompt, then press Enter.
+
+The paste is **hidden** (read with `getpass`), so the one-time code never
+appears on screen or in a recording — you're pasting blind, which is
+normal. The script then prints a leak-free confirmation (the URL's length
+and whether it starts with your callback URL) so you know it registered.
+
+Notes:
+- Run it in a real console — **PowerShell or cmd on Windows, not Git Bash
+  / mintty** — otherwise `getpass` can't hide the input.
+- It removes the existing token first, so finish the login (or just
+  re-run if you abort).
+- Verify it worked by selecting Schwab as the data source and scanning a
+  ticker, or by checking that the token file was freshly written.
+
+**Caution:** a saved Schwab token grants access to your brokerage account
+data. On a shared or cloud host, protect it accordingly — and prefer
+running locally when you can. `schwab_auth.py` chmods both `config.toml`
+and the token file to `0600` (owner-only) on POSIX hosts; on Windows that
+is effectively a no-op (ACL-based). Keep the app's permissions read-only
+(step 1) so the token can't place trades even if it leaks.
+
+### What's stored, and where to secure it
+
+Two files hold secrets, and they live **together on whichever single host
+runs the scanner or dashboard**:
+
+- `config.toml` — your **app key + app secret**
+- the token file (`~/.config/schwab-token.json`) — the OAuth tokens
+
+The app secret has to sit on that host because it's used to refresh the
+30-minute access token on every request — so copying *only* the token to
+another machine won't work (it would stop after the first refresh). Your
+**browser is just a thin client**; it holds no secrets.
+
+- **Running locally** (most setups): both files are on your machine —
+  secure them there. The browser talks to `localhost`, nothing else to
+  protect.
+- **Running on a remote/cloud host** (the `--manual` case): the app key,
+  app secret, and token **all** live on that host — secure them there.
+  Your laptop only runs a browser for the login and stores nothing
+  persistent.
 
 ## Usage
 

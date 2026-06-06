@@ -510,7 +510,8 @@ def save_html(
 
 def _leaderboard_html(results: list[dict], side: str, min_oi: int,
                       top_n: int, min_vol: int,
-                      delta_range: tuple[float, float] | None = None) -> str:
+                      delta_range: tuple[float, float] | None = None,
+                      buy: bool = False) -> str:
     """Cross-ticker leaderboard table for one side, mirroring the UI.
 
     "Best per ticker, then fill": every ticker's #1 pick is guaranteed a
@@ -534,7 +535,7 @@ def _leaderboard_html(results: list[dict], side: str, min_oi: int,
         if sub.empty:
             continue
         sub = (sub.sort_values(["iv_excess", "open_interest"],
-                               ascending=[False, False]).head(top_n).copy())
+                               ascending=[buy, False]).head(top_n).copy())
         sub["ticker"] = res["position"]["ticker"]
         sub["_is_ticker_top"] = [True] + [False] * (len(sub) - 1)
         per_ticker.append(sub.reset_index(drop=True))
@@ -547,13 +548,13 @@ def _leaderboard_html(results: list[dict], side: str, min_oi: int,
     if leftovers:
         pool = (pd.concat(leftovers, ignore_index=True)
                 .sort_values(["iv_excess", "open_interest"],
-                             ascending=[False, False]))
+                             ascending=[buy, False]))
         board = pd.concat([guaranteed, pool.head(max(0, target - len(guaranteed)))],
                           ignore_index=True)
     else:
         board = guaranteed
     board = (board.sort_values(["iv_excess", "open_interest"],
-                               ascending=[False, False]).head(target))
+                               ascending=[buy, False]).head(target))
 
     rows = []
     for _, r in board.iterrows():
@@ -572,7 +573,7 @@ def _leaderboard_html(results: list[dict], side: str, min_oi: int,
             f'<td data-val="{r["mid"]:.4f}">${r["mid"]:.2f}</td>'
             + (f'<td data-val="{r["last"]:.4f}">${r["last"]:.2f}</td>'
                if r.get("last", 0) > 0 else '<td data-val="0">&mdash;</td>')
-            + f'<td data-val="{iv_ex:.4f}" class="{_iv_class(iv_ex, False)}">{iv_ex:+.1f}</td>'
+            + f'<td data-val="{iv_ex:.4f}" class="{_iv_class(iv_ex, buy)}">{iv_ex:+.1f}</td>'
             f'<td data-val="{r["delta"]:.4f}">{r["delta"]:.2f}</td>'
             f'<td data-val="{r["ann_yield_pct"]:.4f}">{r["ann_yield_pct"]:.1f}</td>'
             f'<td data-val="{r["open_interest"]}">{r["open_interest"]:,}</td>'
@@ -607,6 +608,7 @@ def render_portfolio_html(
     min_vol: int = 0,
     opt_type: str = "calls",
     delta_range: tuple[float, float] | None = None,
+    buy: bool = False,
 ) -> str:
     """Return a combined portfolio HTML report as a string."""
     today = date.today()
@@ -619,7 +621,8 @@ def render_portfolio_html(
         sides = (["call", "put"] if opt_type == "both"
                  else ["call" if opt_type == "calls" else "put"])
         boards = "".join(
-            _leaderboard_html(results, s, min_oi, top_n, min_vol, delta_range)
+            _leaderboard_html(results, s, min_oi, top_n, min_vol, delta_range,
+                              buy)
             for s in sides
         )
         if boards:
@@ -701,7 +704,7 @@ def render_portfolio_html(
                     )
 
             sub = (df[df["type"] == "call"]
-                   .sort_values(["iv_excess", "open_interest"], ascending=[False, False])
+                   .sort_values(["iv_excess", "open_interest"], ascending=[buy, False])
                    .head(top_n))
 
             roll_note = ""
@@ -717,7 +720,7 @@ def render_portfolio_html(
                 table_html = (
                     f"{roll_note}"
                     f'<div style="overflow:auto">'
-                    f"{_build_table(sub, tbl_id, False, roll_close)}"
+                    f"{_build_table(sub, tbl_id, buy, roll_close)}"
                     f"</div>"
                 )
             else:
@@ -771,7 +774,7 @@ def render_portfolio_html(
 {sections_html}
 <div class="card">
   <h2 style="margin-top:0">How to read this report</h2>
-  {_guide_html(False)}
+  {_guide_html(buy)}
 </div>
 <script>{_JS}</script>
 </body>
@@ -787,9 +790,11 @@ def save_portfolio_html(
     min_vol: int = 0,
     opt_type: str = "calls",
     delta_range: tuple[float, float] | None = None,
+    buy: bool = False,
 ) -> None:
     html = render_portfolio_html(results, csv_name, min_oi, top_n, min_vol,
-                                 opt_type=opt_type, delta_range=delta_range)
+                                 opt_type=opt_type, delta_range=delta_range,
+                                 buy=buy)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     log.info("Portfolio HTML report saved: %s", output_path)

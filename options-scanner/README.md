@@ -40,7 +40,23 @@ For repo-wide setup (`uv sync`, etc.) see the
 uv run streamlit run options-scanner/run_app.py
 ```
 
-A browser tab opens at `http://localhost:8501` with six tabs:
+A browser tab opens at `http://localhost:8501`. Six tabs cover the
+options-analysis workflow (below); a seventh, **Live Charts**, embeds the
+live trading dashboard. To launch the scanner and the dashboard together
+(so Live Charts is populated), run `uv run run.py` from the repo root. Both
+servers then stream their logs to the one terminal you started them from,
+line-prefixed `[scanner]` and `[dashboard]` so you can tell them apart; the
+dashboard also stays directly reachable at `http://localhost:5000`.
+
+To run them separately instead — each in its own terminal, with its own
+logs:
+
+```bash
+uv run streamlit run options-scanner/run_app.py   # scanner only  (:8501)
+uv run trading-dashboard/app.py                    # dashboard only (:5000)
+```
+
+The options-analysis tabs:
 
 - **Single Ticker** — type a symbol, pick Calls/Puts/Both and Sell/Buy,
   hit Scan. Filter inputs: Min DTE / Max DTE, Min OI, Min Vol (today's

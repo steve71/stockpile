@@ -14,6 +14,15 @@ def _key(source,symbol,interval,limit): return hashlib.md5(f"{source}:{symbol}:{
 # ── Startup layout (config.toml) ──────────────────────────────────────────────
 _CONFIG_PATH = Path(__file__).resolve().parent / "config.toml"
 _VALID_SOURCES = {"yfinance", "schwab", "hyperliquid"}
+
+# Static, request-arg-free hint appended to Schwab fetch errors. The most
+# common cause is the 7-day token lapsing; point at the fix. (Static text
+# only — never echo the exception, per CWE-209.)
+_SCHWAB_AUTH_HINT = (
+    " Often the Schwab token has expired (7-day limit) — from the stockpile "
+    "directory run: uv run options-scanner/schwab_auth.py, then reload. "
+    "First-time setup: options-scanner/SCHWAB_DATA_SOURCE.md."
+)
 _VALID_TFS = {"1m","3m","5m","15m","30m","1h","4h","1d","1w","1M"}
 _VALID_COUNTS = {1, 2, 4, 6, 8}
 _DEFAULT_LAYOUT = {"default_source": "yfinance", "chart_count": 1, "panes": []}
@@ -74,7 +83,7 @@ def ohlcv():
         app.logger.exception("ohlcv fetch failed (source=%s symbol=%s interval=%s)", source, symbol, interval)
         msg = f"Could not fetch data for '{symbol}' from '{source}'."
         if source == "schwab":
-            msg += " If Schwab isn't set up, see options-scanner/SCHWAB_DATA_SOURCE.md."
+            msg += _SCHWAB_AUTH_HINT
         return jsonify({"ok":False,"error":msg}), 400
 
 @app.route('/api/price')
@@ -85,7 +94,10 @@ def price():
             candles = fetch_ohlcv(source,symbol,'1d',2); _put(ckey,candles)
         except Exception:
             app.logger.exception("price fetch failed (source=%s symbol=%s)", source, symbol)
-            return jsonify({"ok":False,"error":f"Could not fetch price for '{symbol}' from '{source}'"}), 400
+            pmsg = f"Could not fetch price for '{symbol}' from '{source}'."
+            if source == "schwab":
+                pmsg += _SCHWAB_AUTH_HINT
+            return jsonify({"ok":False,"error":pmsg}), 400
     if len(candles) >= 2:
         prev, last = candles[-2]['close'], candles[-1]['close']
     elif candles:

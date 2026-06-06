@@ -28,7 +28,17 @@ def normalize_ticker_schwab(ticker: str) -> str:
         return f"${t}"
     return t
 
+# Cache maps (app_key, token_path) -> (client, token_file_mtime). The mtime
+# is the cache-invalidation key: see get_client.
 _client_cache: dict = {}
+
+
+def _token_mtime(token_path: Path) -> float | None:
+    """Modification time of the token file, or None if it doesn't exist."""
+    try:
+        return token_path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def get_client(app_key: str, app_secret: str, callback_url: str,
@@ -40,15 +50,25 @@ def get_client(app_key: str, app_secret: str, callback_url: str,
     refresh token. The refresh token itself has a fixed 7-day TTL from
     the initial OAuth — once expired, every quote/chain call returns
     None and the user must re-run schwab_auth.py.
+
+    The cached client is rebuilt whenever the token file's mtime changes,
+    so re-running schwab_auth.py is picked up by a long-running process
+    (the Streamlit server, the trading dashboard) without a restart.
+    schwab-py's own periodic access-token refresh also rewrites the file,
+    which triggers a harmless rebuild from the freshly-refreshed token.
+
     Raises ValueError with a user-friendly message on auth failure.
     """
     import schwab
 
-    cache_key = (app_key, str(Path(token_file).expanduser()))
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
     token_path = Path(token_file).expanduser()
+    cache_key = (app_key, str(token_path))
+    mtime = _token_mtime(token_path)
+
+    cached = _client_cache.get(cache_key)
+    if cached is not None and cached[1] == mtime:
+        return cached[0]
+
     try:
         client = schwab.auth.client_from_token_file(
             str(token_path), app_key, app_secret
@@ -70,7 +90,10 @@ def get_client(app_key: str, app_secret: str, callback_url: str,
             "Run: uv run options-scanner/schwab_auth.py"
         ) from exc
 
-    _client_cache[cache_key] = client
+    # Re-stat after building: client_from_token_file may refresh-and-rewrite
+    # the file on load, and the login flow just created it — cache the
+    # post-build mtime so the next call doesn't rebuild needlessly.
+    _client_cache[cache_key] = (client, _token_mtime(token_path))
     return client
 
 

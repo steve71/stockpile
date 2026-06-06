@@ -733,6 +733,23 @@ def badge(
     return f"<span class='osc-badge osc-badge-{v}'>{text}</span>"
 
 
+def render_schwab_reauth_hint(provider: str) -> None:
+    """Show an actionable re-auth hint next to a Schwab fetch error.
+
+    The saved Schwab token has a 7-day TTL; once it lapses, price/chain
+    fetches fail (most commonly "Could not fetch live price …"). When the
+    active data source is Schwab, surface the fix — the auth command, run
+    from the repo root — so users don't have to remember it. No-op for any
+    other provider.
+    """
+    if provider != "schwab":
+        return
+    st.info("Using **Schwab**? A common cause is the saved token expiring "
+            "(7-day limit). From your **stockpile** directory, re-authenticate "
+            "in a terminal, then rescan:")
+    st.code("uv run options-scanner/schwab_auth.py", language="bash")
+
+
 def metric_card(
     label: str,
     value: str,

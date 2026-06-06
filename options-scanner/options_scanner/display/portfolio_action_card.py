@@ -31,11 +31,17 @@ def render_portfolio_action_card(
     min_oi: int,
     min_vol: int,
     opt_type: str = "calls",
+    buy: bool = False,
 ) -> None:
-    """Translate the top IV-rich candidate into an explicit buy/sell action.
+    """Translate the top candidate into an explicit buy/sell action.
 
-    covered=True + roll_close supplied → ROLL: BTC existing, STO top pick.
-    Otherwise → STO the top pick (covered call for calls; CSP for puts).
+    Sell mode (default): picks the rank-1 IV-rich contract.
+      covered=True + roll_close supplied → ROLL: BTC existing, STO top pick.
+      Otherwise → STO the top pick (covered call for calls; CSP for puts).
+
+    Buy mode: picks the rank-1 IV-cheap contract and frames it as a long
+    option (BUY TO OPEN) — debit, max loss, breakeven, directional delta.
+    Roll/cover semantics don't apply to a fresh long, so they're skipped.
 
     opt_type is "calls" or "puts"; never "both" — the caller splits the df
     and calls this function once per side when opt_type is "both".
@@ -49,9 +55,12 @@ def render_portfolio_action_card(
     if eligible.empty:
         return
     sort_col = "signal_score" if "signal_score" in eligible.columns else "iv_excess"
+    # Sell wants the richest signal first (descending); buy wants the
+    # cheapest (most-negative IV+pp) first (ascending) — same convention as
+    # the chain table and leaderboard.
     pick = (
         eligible.sort_values([sort_col, "open_interest"],
-                             ascending=[False, False])
+                             ascending=[buy, False])
         .iloc[0]
     )
     strike = float(pick["strike"])
@@ -60,9 +69,57 @@ def render_portfolio_action_card(
     iv_excess_pp = float(pick["iv_excess"]) * 100.0
     delta = float(pick.get("delta", 0.0))
 
-    accent = OUTLOOK_TONE_HEX["pos"]   # green — premium income
+    accent = OUTLOOK_TONE_HEX["pos"]   # green — premium income (sell default)
+    signal_lbl = "top IV-cheap signal" if buy else "top IV+pp signal"
 
-    if covered and roll_close is not None and open_options:
+    if buy:
+        # ── BUY TO OPEN (long call or long put) ───────────────────────────
+        # A fresh long is a debit position — no roll/cover context applies.
+        debit = mid * 100.0
+        move_dollars = abs(delta) * 100.0
+        if opt_type == "puts":
+            accent = OUTLOOK_TONE_HEX["neg"]   # red — bearish / downside
+            action_label = "BUY TO OPEN long put"
+            action_lines = [
+                f"<b>Action:</b> Buy 1×"
+                f" <code>{ticker} {fmt_strike(strike)}P exp {expiry}</code>"
+                f" at mid ~${mid:.2f}",
+                f"<b>Cost (debit):</b> ${debit:,.0f} (1 contract)",
+                f"<b>Max loss:</b> ${debit:,.0f} — the debit, if it expires"
+                f" worthless",
+                f"<b>Delta:</b> ~{delta:.2f} — gains ≈ ${move_dollars:.0f}"
+                f" per $1 down-move",
+                "<b>Stance:</b> bearish bet / synthetic short as the stock"
+                " drops — or a hedge for shares you hold elsewhere.",
+                "<b>Hedging instead?</b> Protective puts usually sit further"
+                " OTM (|Δ| ~0.15–0.30) — cheaper, with less participation."
+                " Lower the delta filter to surface them.",
+            ]
+            breakeven_line = (
+                f"<b>Breakeven (stock):</b> ${strike - mid:.2f}"
+                f" (strike − premium) — below this the put is in profit at"
+                f" expiry"
+            )
+        else:
+            accent = OUTLOOK_TONE_HEX["pos"]   # green — bullish / upside
+            action_label = "BUY TO OPEN long call"
+            action_lines = [
+                f"<b>Action:</b> Buy 1×"
+                f" <code>{ticker} {fmt_strike(strike)}C exp {expiry}</code>"
+                f" at mid ~${mid:.2f}",
+                f"<b>Cost (debit):</b> ${debit:,.0f} (1 contract)",
+                f"<b>Max loss:</b> ${debit:,.0f} — the debit, if it expires"
+                f" worthless",
+                f"<b>Delta:</b> ~{delta:.2f} — gains ≈ ${move_dollars:.0f}"
+                f" per $1 up-move (long exposure)",
+            ]
+            breakeven_line = (
+                f"<b>Breakeven (stock):</b> ${strike + mid:.2f}"
+                f" (strike + premium) — above this the call is in profit at"
+                f" expiry"
+            )
+
+    elif covered and roll_close is not None and open_options:
         # ── ROLL (calls or puts) ──────────────────────────────────────────
         existing = open_options[0]
         net_cr_per_contract = (mid - roll_close) * 100.0
@@ -176,7 +233,7 @@ def render_portfolio_action_card(
             <div style="font-size: 0.65rem; font-weight: 700;
                         text-transform: uppercase; letter-spacing: 0.08em;
                         color: var(--osc-ink-4); margin-bottom: 2px;">
-                Recommended action · top IV+pp signal ({iv_excess_pp:+.1f} pp)
+                Recommended action · {signal_lbl} ({iv_excess_pp:+.1f} pp)
             </div>
             <div style="font-size: 1rem; font-weight: 700; color: {accent};
                         margin-bottom: 6px;">
