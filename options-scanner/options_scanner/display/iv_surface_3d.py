@@ -45,12 +45,20 @@ def render_iv_surface_3d(frame: pd.DataFrame, spot: float, ticker: str,
                          fit_range: tuple[float, float] | None = None,
                          delta_range: tuple[float, float] | None = None,
                          min_oi: int = 0, min_vol: int = 0,
-                         top_n: int = 0) -> None:
+                         top_n: int = 0,
+                         fit_frame: pd.DataFrame | None = None) -> None:
     """Render the 3D IV surface. No-op when there's no data to show.
 
     When `delta_range` is given and the frame has a `delta` column, an
     in-chart button group (next to the title) toggles between the delta
     band (default) and the full fitted chain — client-side, no rerun.
+
+    `fit_frame` is the full two-sided chain (both calls and puts) used to
+    build the fitted mesh. The dots come from `frame` (one option type),
+    but with OTM-only filtering a single type's in-fit anchors sit on just
+    one side of spot, so the surface would clip at the spot plane; passing
+    both wings keeps it continuous across spot. Falls back to `frame` when
+    omitted.
 
     `min_oi` / `min_vol` / `top_n` are display-only here — surfaced as a
     filter summary under the title so a screenshot is self-explanatory.
@@ -115,14 +123,26 @@ def render_iv_surface_3d(frame: pd.DataFrame, spot: float, ticker: str,
     zr_band = (_zrange(filtered["IV%"], min_span=_full_span * 0.5)
                if has_delta else zr_full)
 
-    # Color saturation from the well-behaved in-fit contracts — computed once
-    # and shared by the surface and both views, so the central region reads
-    # identically in the band and full-chain views. The deep-wing extrapolation
-    # (|IV+pp| can hit ±60 on garbage ITM/OTM IV) no longer drives the scale.
-    if "in_fit" in frame.columns and bool(frame["in_fit"].any()):
-        _pp = frame.loc[frame["in_fit"], "IV+pp"].abs()
-    else:
-        _pp = frame["IV+pp"].abs()
+    # Mesh anchors — the full two-sided in-fit set the fitted surface is built
+    # from. With OTM-only filtering, a single option type's anchors sit on just
+    # one side of spot (calls K>spot, puts K<spot), which would clip the surface
+    # at the spot plane. Using both wings (passed in as `fit_frame`) keeps it
+    # continuous across spot: at an ITM-call strike the height and IV+pp tint
+    # come from the liquid OTM put there (one shared global fit). Falls back to
+    # `frame` when no two-sided frame was supplied (e.g. the Portfolio tab).
+    _mesh_src = fit_frame if fit_frame is not None else frame
+    if "in_fit" in _mesh_src.columns:
+        _mesh_src = _mesh_src[_mesh_src["in_fit"].astype(bool)]
+    mesh_anchor = (_mesh_src.dropna(subset=["FittedIV%", "strike", "dte"])
+                   if "FittedIV%" in _mesh_src.columns else _mesh_src.iloc[0:0])
+
+    # Color saturation from those well-behaved two-sided in-fit anchors —
+    # computed once and shared by the surface and both views, so the central
+    # region reads identically in the band and full-chain views. The deep-wing
+    # extrapolation (|IV+pp| can hit ±60 on garbage ITM/OTM IV) and out-of-fit
+    # ITM dots no longer drive the scale.
+    _pp = (mesh_anchor["IV+pp"].abs() if not mesh_anchor.empty
+           else frame["IV+pp"].abs())
     cmax = max(float(np.nanpercentile(_pp, 90)) if len(_pp) else 1.0, 1.0)
 
     hover = (
@@ -137,22 +157,18 @@ def render_iv_surface_3d(frame: pd.DataFrame, spot: float, ticker: str,
     def _chain_traces(sub: pd.DataFrame, visible: bool):
         """Build (mesh? + dots) traces for one frame; returns (list, mesh_ok)."""
         traces = []
-        # `cmax` (the IV+pp color saturation) is computed once in the enclosing
-        # scope from the in-fit contracts, so the scale is identical in both
-        # views and on the surface.
-        n_exp = sub["expiration"].nunique()
-        n_strk = sub["strike"].nunique()
-        mesh_ok = n_exp >= 2 and n_strk >= 3 and "FittedIV%" in sub.columns
+        # `cmax` (the IV+pp color saturation) and `mesh_anchor` (the two-sided
+        # in-fit set the surface is built from) are computed once in the
+        # enclosing scope, so the scale and the surface are identical in both
+        # views. The fitted surface spans both wings — its gap-fill only ever
+        # sees trustworthy OTM contracts (no wing smear) and it stays continuous
+        # across spot even when the dots show a single option type. Height =
+        # fitted (expected) IV; color = IV+pp deviation (green rich, red cheap).
+        # Out-of-fit dots simply float above/below it.
+        mesh_ok = (mesh_anchor["expiration"].nunique() >= 2
+                   and mesh_anchor["strike"].nunique() >= 3)
         if mesh_ok:
-            # Fitted surface from the in-fit anchors of the full frame — so it's
-            # identical in the band and full-chain views and its gap-fill only
-            # ever sees trustworthy contracts (no wing smear). Height = fitted
-            # (expected) IV; color = IV+pp deviation (green rich, red cheap).
-            # Out-of-fit dots simply float above/below it.
-            fit_df = (frame[frame["in_fit"]] if "in_fit" in frame.columns
-                      else frame).dropna(subset=["FittedIV%"])
-            if fit_df.empty:
-                fit_df = sub.dropna(subset=["FittedIV%"])
+            fit_df = mesh_anchor
 
             def _grid(df, value):
                 return df.pivot_table(index="dte", columns="strike",

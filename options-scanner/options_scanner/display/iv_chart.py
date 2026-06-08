@@ -180,9 +180,21 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
                 fit_range = (float(_anchors["strike"].min()),
                              float(_anchors["strike"].max()))
         if view == "3D surface":
+            # The fitted mesh needs both wings to span spot: with OTM-only
+            # filtering a single option type's in-fit anchors sit on one side of
+            # spot, so a single-type surface clips at the spot plane. Pass the
+            # full two-sided fit frame (both calls and puts) for the mesh; the
+            # dots still use the single-type overlay_df. (For "both", overlay_df
+            # is already two-sided, so reuse it.)
+            if df_full is not None and not df_full.empty:
+                fit_frame = (overlay_df if mode not in ("call", "put")
+                             else _prep(df_full))
+            else:
+                fit_frame = None
             render_iv_surface_3d(overlay_df, spot, ticker, mode, buy,
                                  fit_range, delta_range=delta_range,
-                                 min_oi=min_oi, min_vol=min_vol, top_n=top_n)
+                                 min_oi=min_oi, min_vol=min_vol, top_n=top_n,
+                                 fit_frame=fit_frame)
         else:
             _render_all_expirations(overlay_df, spot, ticker, mode, fit_range)
         return
