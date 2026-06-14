@@ -18,6 +18,7 @@ To run either app on its own instead:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -26,7 +27,23 @@ import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-DASHBOARD_HEALTH = "http://127.0.0.1:5000/api/health"
+
+
+def _dashboard_port() -> int:
+    """Dashboard TCP port, overridable via OSC_DASHBOARD_PORT (default 5000)
+    for hosts where 5000 is taken. The Flask child and the scanner's Live
+    Charts embed read the same var, so all three stay in sync."""
+    raw = os.environ.get("OSC_DASHBOARD_PORT", "").strip()
+    try:
+        port = int(raw)
+    except ValueError:
+        return 5000
+    return port if 1 <= port <= 65535 else 5000
+
+
+DASHBOARD_PORT = _dashboard_port()
+DASHBOARD_URL = f"http://localhost:{DASHBOARD_PORT}"
+DASHBOARD_HEALTH = f"http://127.0.0.1:{DASHBOARD_PORT}/api/health"
 
 _print_lock = threading.Lock()
 
@@ -78,17 +95,15 @@ def main() -> int:
     dashboard = None  # only set if WE started it (so we only stop ours)
 
     if _probe():
-        print("[run] Trading dashboard already running on "
-              "http://localhost:5000 — reusing it (its logs stay in its own "
-              "terminal).")
+        print(f"[run] Trading dashboard already running on {DASHBOARD_URL} — "
+              "reusing it (its logs stay in its own terminal).")
     else:
         # On Windows, put Flask in a new process group so the console's Ctrl+C
         # doesn't kill it before our own cleanup runs.
         kw = {}
         if sys.platform == "win32":
             kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        print("[run] Starting trading dashboard (Flask) on "
-              "http://localhost:5000 ...")
+        print(f"[run] Starting trading dashboard (Flask) on {DASHBOARD_URL} ...")
         dashboard = _start_logged(
             [sys.executable, "trading-dashboard/app.py"], "[dashboard]", **kw,
         )

@@ -59,6 +59,7 @@ def build_option_row(
     volume: int,
     theta: float = 0.0,
     vega: float = 0.0,
+    last_trade_days: float = float("nan"),
 ) -> dict | None:
     """Apply quote-quality filters and assemble a canonical chain row.
 
@@ -114,6 +115,9 @@ def build_option_row(
         "ann_yield_pct":  ann_yield,
         "open_interest":  open_interest,
         "volume":         volume,
+        # Days since the contract last traded (NaN when the provider
+        # doesn't say) — feeds the fresh_quotes surface filter.
+        "last_trade_days": last_trade_days,
         "earnings_count": 0,
         "hv_20":          float("nan"),
         "vr_ratio":       float("nan"),

@@ -98,12 +98,11 @@ def show_surface_diagnostics(df_full: pd.DataFrame,
 
         # ── Filter funnel ─────────────────────────────────────────────────
         st.markdown("**Filter funnel** — contracts feeding the fit")
-        valid = df_full[(df_full["iv"] > 0.02) & (df_full["dte"] > 0)]
         funnel_rows: list[tuple[str, int, int]] = [
             ("Fetched (within DTE range)", total, 0),
-            ("IV > 2% and DTE > 0", len(valid), total - len(valid)),
         ]
-        funnel_rows += iv_filters.funnel(valid, surface_filters)
+        funnel_rows += iv_filters.funnel(
+            df_full, iv_filters.with_sanity(surface_filters))
         funnel_df = pd.DataFrame(
             funnel_rows, columns=["Stage", "Remaining", "Dropped"])
         st.dataframe(

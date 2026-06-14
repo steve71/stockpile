@@ -23,10 +23,17 @@ vernacular and remain fine.
 2. Annotate earnings events within each expiration window (elevated IV
    around earnings is expected, not a signal)
 3. Fit an IV surface and score each option, via a three-stage
-   **pluggable pipeline** (defaults reproduce the original behavior):
-   - **Filter** (`iv_filters.py`) — which options feed the regression
+   **pluggable pipeline**:
+   - **Filter** (`iv_filters.py`) — which options feed the regression.
+     Defaults: OTM-only, spread ≤ 50% of mid, delta 0.10–0.95, and
+     earnings-spanning options excluded; an always-on sanity stage
+     (IV noise floor/ceiling, DTE > 0) is prepended via `with_sanity`.
+     Opt-in: min-OI and `fresh_quotes` (drop known-stale Yahoo quotes)
    - **Algorithm** (`iv_algorithms.py`) — `global_poly` (default) or
-     `per_expiration`; produces `iv_fitted`
+     `per_expiration`; produces `iv_fitted`. Both accept `weights`
+     (`oi` / `inv_spread` / `vega`) and `robust` (`huber` / `tukey`
+     IRLS so outliers can't drag the surface toward themselves).
+     `global_poly` drops its m²·√T curvature term below 3 expirations
    - **Score** (`iv_scores.py`) — the ranking key `signal_score`;
      defaults to `raw_pp` (= IV excess), with z-score, relative,
      execution-cost composite, VRP, and historical-percentile options
@@ -37,8 +44,8 @@ vernacular and remain fine.
 The Single Ticker tab exposes a **Global / Per-expiry** preset toggle
 (the "Fit:" radio) plus an **Advanced surface fit** expander to mix the
 three stages; the CLI mirrors this via `--preset {current,v2}` /
-`--algorithm` / `--score` (the CLI preset names differ from the UI
-labels). The
+`--algorithm` / `--fit-weights` / `--robust` / `--score` (the CLI
+preset names differ from the UI labels). The
 `percentile` score persists scans to a gitignored SQLite store
 (`options-scanner/cache/`) and is blank until history accumulates.
 
@@ -74,7 +81,7 @@ Run `uv sync` from repo root after any `pyproject.toml` change.
 |---------|----------------------------------------------------|
 | Top     | Web UI only. Rank within the top-N list per type (1 = strongest signal); blank if not in top N |
 | Strike  | Option strike price                                |
-| Expiration | Expiration date; trailing `2E` = 2 earnings before exp |
+| Expiration | Expiration date                                 |
 | DTE     | Days to expiration                                 |
 | Bid/Ask/Mid | Market prices                                 |
 | IV%     | Implied volatility (annualized %)                  |

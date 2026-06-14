@@ -122,6 +122,24 @@ const fmt = n => !Number.isFinite(n) ? '--' : n >= 1000
   ? n.toLocaleString(undefined, { maximumFractionDigits: 2 })
   : n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 
+const formatAxisTime = (time, withTime = true) => {
+  const ts = Number(time);
+  if (!Number.isFinite(ts)) return '';
+  const date = new Date(ts * 1000);
+  const opts = withTime
+    ? { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }
+    : { year: 'numeric', month: 'numeric', day: 'numeric' };
+  return date.toLocaleString(undefined, opts);
+};
+
+const toChartTime = raw => {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  // >= 1e11 means milliseconds (epoch seconds top out ~4.1e9); 1e11 also
+  // catches the ms timestamps of old dates, which a 1e12 cut would miss.
+  return Math.abs(n) >= 1e11 ? Math.floor(n / 1000) : Math.floor(n);
+};
+
 const tfSec = tf => ({ '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800, '1M': 2592000 }[tf] || 900);
 
 function mkSel(opts, val, isSource = false) {
@@ -135,12 +153,24 @@ function mkSel(opts, val, isSource = false) {
   return s;
 }
 
-function lwcOpts() {
+function lwcOpts(tf) {
+  // Intraday timeframes show a clock; day-and-up show date only, so a
+  // daily/weekly/monthly axis isn't cluttered with an arbitrary HH:MM.
+  const withTime = tfSec(tf) < 86400;
   return {
     layout: { background: { type: 'solid', color: '#12192a' }, textColor: '#9aa8c7' },
     grid: { vertLines: { color: 'rgba(255,255,255,.03)' }, horzLines: { color: 'rgba(255,255,255,.04)' } },
     rightPriceScale: { borderColor: '#283348' },
-    timeScale: { borderColor: '#283348', timeVisible: true, secondsVisible: false },
+    timeScale: {
+      borderColor: '#283348',
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: (time) => formatAxisTime(time, withTime),
+    },
+    localization: {
+      locale: navigator.language || 'en-US',
+      timeFormatter: (time) => formatAxisTime(time, withTime),
+    },
     crosshair: { mode: 1 },
     watermark: { visible: false },
   };
@@ -286,7 +316,7 @@ async function initPane(paneId) {
     if (!window.LightweightCharts) throw new Error('Chart library not loaded');
     const w = Math.max(320, chartWrap.clientWidth || 400);
     const h = Math.max(280, chartWrap.clientHeight || 300);
-    chart = LightweightCharts.createChart(chartEl, { ...lwcOpts(), width: w, height: h });
+    chart = LightweightCharts.createChart(chartEl, { ...lwcOpts(ps.timeframe), width: w, height: h });
     series = chart.addCandlestickSeries({
       upColor: '#16c784', downColor: '#ea3943',
       borderUpColor: '#16c784', borderDownColor: '#ea3943',
@@ -305,7 +335,19 @@ async function initPane(paneId) {
     if (!body.data || !body.data.length) throw new Error(`No data for ${ps.symbol}`);
     const candles = body.data
       .filter(b => b && isFinite(b.time) && isFinite(b.open) && isFinite(b.high) && isFinite(b.low) && isFinite(b.close))
-      .map(b => ({ time: Number(b.time), open: Number(b.open), high: Number(b.high), low: Number(b.low), close: Number(b.close), volume: Number(b.volume || 0) }));
+      .map(b => {
+        const time = toChartTime(b.time);
+        if (time === null) return null;
+        return {
+          time,
+          open: Number(b.open),
+          high: Number(b.high),
+          low: Number(b.low),
+          close: Number(b.close),
+          volume: Number(b.volume || 0),
+        };
+      })
+      .filter(Boolean);
     if (!candles.length) throw new Error(`No valid candles for ${ps.symbol}`);
     series.setData(candles);
     chart.timeScale().fitContent();

@@ -6,7 +6,7 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 
-from options_scanner.chain import _norm_cdf, _norm_pdf
+from stocks_shared import black_scholes as bs
 
 RISK_FREE_RATE = 0.045
 
@@ -66,49 +66,26 @@ NEUTRAL_STRATEGIES = [
 ]
 
 # ── BS helpers ────────────────────────────────────────────────────────────────
-
-def _d1d2(S, K, T, sigma):
-    r = RISK_FREE_RATE
-    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-    return d1, d1 - sigma * math.sqrt(T)
-
+# Thin wrappers over stocks_shared.black_scholes that bake in this
+# module's RISK_FREE_RATE, keeping the historical r-less signatures.
 
 def prob_above(S: float, K: float, T: float, sigma: float) -> float:
     """Risk-neutral P(S_T > K) = N(d2)."""
-    if T <= 0 or sigma < 0.001 or S <= 0 or K <= 0:
-        return 1.0 if S > K else 0.0
-    _, d2 = _d1d2(S, K, T, sigma)
-    return _norm_cdf(d2)
+    return bs.prob_above(S, K, T, RISK_FREE_RATE, sigma)
 
 
 def _bs_price(S: float, K: float, T: float, sigma: float, opt_type: str) -> float:
-    r = RISK_FREE_RATE
-    if T <= 0 or sigma < 0.001:
-        return max(0.0, S - K) if opt_type == "call" else max(0.0, K - S)
-    d1, d2 = _d1d2(S, K, T, sigma)
-    if opt_type == "call":
-        return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
-    return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+    return bs.bs_price(S, K, T, RISK_FREE_RATE, sigma, opt_type)
 
 
 def _bs_theta(S: float, K: float, T: float, sigma: float, opt_type: str) -> float:
     """Daily theta per share (negative = loses value each day for long holders)."""
-    r = RISK_FREE_RATE
-    if T <= 0 or sigma < 0.001 or S <= 0:
-        return 0.0
-    d1, d2 = _d1d2(S, K, T, sigma)
-    term1 = -(S * _norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
-    if opt_type == "call":
-        return (term1 - r * K * math.exp(-r * T) * _norm_cdf(d2)) / 365
-    return (term1 + r * K * math.exp(-r * T) * _norm_cdf(-d2)) / 365
+    return bs.bs_theta(S, K, T, RISK_FREE_RATE, sigma, opt_type)
 
 
 def _bs_vega(S: float, K: float, T: float, sigma: float) -> float:
     """Vega per 1-point IV move (same for calls and puts)."""
-    if T <= 0 or sigma < 0.001 or S <= 0:
-        return 0.0
-    d1, _ = _d1d2(S, K, T, sigma)
-    return S * _norm_pdf(d1) * math.sqrt(T)
+    return bs.bs_vega(S, K, T, RISK_FREE_RATE, sigma)
 
 
 def _mid_price(row) -> float:
@@ -137,6 +114,32 @@ def _T(dte: int) -> float:
 
 def _empty() -> pd.DataFrame:
     return pd.DataFrame(columns=SPREAD_COLS)
+
+
+def _make_leg(r, opt_type: str, qty: int, suffix: str = "",
+              T: float | None = None, strike: float | None = None) -> dict:
+    """Build a `_spread_greeks` leg dict from a (possibly merged) row.
+
+    `suffix` selects the merge-suffixed columns ("_s", "_l", "_c", ...).
+    The native_* Greeks default to 0.0 when absent so Yahoo rows fall
+    back to Black-Scholes. `T` adds the per-leg expiry override used by
+    calendars; `strike` overrides the column lookup for merges keyed on
+    strike (straddles), where the strike column carries no suffix.
+    """
+    leg = {
+        "type": opt_type,
+        "strike": float(r[f"strike{suffix}"]) if strike is None else strike,
+        "qty": qty,
+        "entry_mid": float(r[f"mid{suffix}"]),
+        "iv": float(r[f"iv{suffix}"]),
+        "native_delta": _ng(r, f"delta{suffix}"),
+        "native_gamma": _ng(r, f"gamma{suffix}"),
+        "native_theta": _ng(r, f"theta{suffix}"),
+        "native_vega":  _ng(r, f"vega{suffix}"),
+    }
+    if T is not None:
+        leg["T"] = T
+    return leg
 
 
 # ── Payoff diagram ────────────────────────────────────────────────────────────
@@ -276,9 +279,8 @@ def _spread_greeks(legs: list[dict], spot: float, T: float) -> dict:
             # Black-Scholes fallback (Yahoo, or broker legs with no Greek data)
             if leg_T <= 0 or iv < 0.001:
                 continue
-            d1, d2 = _d1d2(spot, K, leg_T, iv)
-            delta = _norm_cdf(d1) if ot == "call" else _norm_cdf(d1) - 1.0
-            gamma = _norm_pdf(d1) / (spot * iv * math.sqrt(leg_T))
+            delta = bs.bs_delta(spot, K, leg_T, RISK_FREE_RATE, iv, ot)
+            gamma = bs.bs_gamma(spot, K, leg_T, RISK_FREE_RATE, iv)
             theta = _bs_theta(spot, K, leg_T, iv, ot)
             vega  = _bs_vega(spot, K, leg_T, iv)
             nd += qty * delta
@@ -330,253 +332,109 @@ def _finalise(rows: list[dict], spot: float, earnings_dates: list) -> pd.DataFra
     return df[SPREAD_COLS].reset_index(drop=True)
 
 
-# ── Builder: Bull Put Spread ──────────────────────────────────────────────────
+# ── Builder: Vertical spreads ─────────────────────────────────────────────────
+# The four two-leg verticals share one engine. A vertical is pinned by
+# (opt_type, credit): bull put = put credit, bear call = call credit,
+# bull call = call debit, bear put = put debit. Everything else — which
+# strike is short, breakeven direction, payoff — follows from those two.
+
+def _build_vertical(df, min_dte, max_dte, min_width, max_width, min_oi,
+                    earnings_dates, *, strategy, opt_type, credit):
+    bullish = credit == (opt_type == "put")
+    # Credit verticals sell near the money (|Δ| ≤ 0.55); debit verticals
+    # reach closer to the money for the long leg (|Δ| ≤ 0.70).
+    delta_hi = 0.55 if credit else 0.70
+    sub = df[(df["type"] == opt_type) &
+             (df["dte"] >= min_dte) & (df["dte"] <= max_dte) &
+             (df["open_interest"] >= min_oi) &
+             (df["delta"].abs() >= 0.04) & (df["delta"].abs() <= delta_hi)].copy()
+    if sub.empty:
+        return _empty()
+
+    m = sub.merge(sub, on="expiration", suffixes=("_s", "_l"))
+    # Bullish verticals short the higher strike; bearish the lower.
+    m = m[m["strike_s"] > m["strike_l"]] if bullish \
+        else m[m["strike_s"] < m["strike_l"]]
+    m = m[(m["strike_s"] - m["strike_l"]).abs().between(min_width, max_width)]
+    if m.empty:
+        return _empty()
+
+    spot = float(df["spot"].iloc[0])
+    m["net_credit"] = m["mid_s"] - m["mid_l"]   # negative = net debit
+    m = m[m["net_credit"] > 0.01] if credit else m[m["net_credit"] < -0.01]
+    w = (m["strike_s"] - m["strike_l"]).abs()
+    m["max_profit"] = m["net_credit"] if credit else w + m["net_credit"]
+    m["max_loss"] = (w - m["net_credit"]) if credit else -m["net_credit"]
+    m = m[(m["max_profit"] > 0.01) & (m["max_loss"] > 0.01)]
+    m["risk_reward"] = m["max_profit"] / m["max_loss"]
+    # Breakeven sits on the short strike (credit) / long strike (debit),
+    # offset by the net premium toward the profitable side.
+    anchor = m["strike_s"] if credit else m["strike_l"]
+    amount = m["net_credit"].abs()
+    m["breakeven1"] = anchor + (amount if opt_type == "call" else -amount)
+    m["ann_yield_pct"] = m["max_profit"] / m["max_loss"] * (365 / m["dte_s"]) * 100
+
+    rows = []
+    for _, r in m.iterrows():
+        T = _T(int(r["dte_s"]))
+        # POP measured at the breakeven, priced with the IV of the leg
+        # that anchors it (short for credit, long for debit).
+        p = prob_above(spot, r["breakeven1"], T,
+                       r["iv_s"] if credit else r["iv_l"])
+        pop = p if bullish else 1 - p
+        legs = [_make_leg(r, opt_type, -1, "_s"),
+                _make_leg(r, opt_type, +1, "_l")]
+        g = _spread_greeks(legs, spot, T)
+        rows.append({
+            "strategy": strategy, "expiration": r["expiration"],
+            "dte": int(r["dte_s"]), "spot": spot,
+            "short_strike": r["strike_s"], "long_strike": r["strike_l"],
+            "short_type": opt_type, "long_type": opt_type,
+            "short_mid": r["mid_s"], "long_mid": r["mid_l"],
+            "short_iv": r["iv_s"], "long_iv": r["iv_l"],
+            "net_credit": r["net_credit"],
+            "max_profit": r["max_profit"], "max_loss": r["max_loss"],
+            "risk_reward": r["risk_reward"], "pop": pop,
+            "ann_yield_pct": r["ann_yield_pct"],
+            "breakeven1": r["breakeven1"], "breakeven2": float("nan"),
+            "short_iv_excess": r.get("iv_excess_s", 0.0),
+            "short_oi": int(r["open_interest_s"]),
+            "long_oi": int(r["open_interest_l"]),
+            **g,
+        })
+    return _finalise(rows, spot, earnings_dates or [])
+
 
 def build_bull_put_spreads(df, min_dte, max_dte, min_width, max_width,
                             min_oi, earnings_dates=None):
-    puts = df[(df["type"] == "put") &
-              (df["dte"] >= min_dte) & (df["dte"] <= max_dte) &
-              (df["open_interest"] >= min_oi) &
-              (df["delta"].abs() >= 0.04) & (df["delta"].abs() <= 0.55)].copy()
-    if puts.empty:
-        return _empty()
+    return _build_vertical(df, min_dte, max_dte, min_width, max_width,
+                           min_oi, earnings_dates,
+                           strategy="Bull Put Spread",
+                           opt_type="put", credit=True)
 
-    m = puts.merge(puts, on="expiration", suffixes=("_s", "_l"))
-    m = m[m["strike_s"] > m["strike_l"]]
-    w = m["strike_s"] - m["strike_l"]
-    m = m[w.between(min_width, max_width)]
-    if m.empty:
-        return _empty()
-
-    spot = float(df["spot"].iloc[0])
-    m["net_credit"] = m["mid_s"] - m["mid_l"]
-    m = m[m["net_credit"] > 0.01]
-    w = m["strike_s"] - m["strike_l"]
-    m["max_profit"] = m["net_credit"]
-    m["max_loss"] = w - m["net_credit"]
-    m = m[m["max_loss"] > 0.01]
-    m["risk_reward"] = m["max_profit"] / m["max_loss"]
-    m["breakeven1"] = m["strike_s"] - m["net_credit"]
-    m["breakeven2"] = float("nan")
-    m["ann_yield_pct"] = m["net_credit"] / m["max_loss"] * (365 / m["dte_s"]) * 100
-
-    rows = []
-    for _, r in m.iterrows():
-        T = _T(int(r["dte_s"]))
-        pop = prob_above(spot, r["breakeven1"], T, r["iv_s"])
-        legs = [{"type": "put", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
-                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
-                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
-                {"type": "put", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
-                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
-                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")}]
-        g = _spread_greeks(legs, spot, T)
-        rows.append({
-            "strategy": "Bull Put Spread", "expiration": r["expiration"],
-            "dte": int(r["dte_s"]), "spot": spot,
-            "short_strike": r["strike_s"], "long_strike": r["strike_l"],
-            "short_type": "put", "long_type": "put",
-            "short_mid": r["mid_s"], "long_mid": r["mid_l"],
-            "short_iv": r["iv_s"], "long_iv": r["iv_l"],
-            "net_credit": r["net_credit"],
-            "max_profit": r["max_profit"], "max_loss": r["max_loss"],
-            "risk_reward": r["risk_reward"], "pop": pop,
-            "ann_yield_pct": r["ann_yield_pct"],
-            "breakeven1": r["breakeven1"], "breakeven2": float("nan"),
-            "short_iv_excess": r.get("iv_excess_s", 0.0),
-            "short_oi": int(r["open_interest_s"]),
-            "long_oi": int(r["open_interest_l"]),
-            **g,
-        })
-    return _finalise(rows, spot, earnings_dates or [])
-
-
-# ── Builder: Bear Call Spread ─────────────────────────────────────────────────
 
 def build_bear_call_spreads(df, min_dte, max_dte, min_width, max_width,
                              min_oi, earnings_dates=None):
-    calls = df[(df["type"] == "call") &
-               (df["dte"] >= min_dte) & (df["dte"] <= max_dte) &
-               (df["open_interest"] >= min_oi) &
-               (df["delta"] >= 0.04) & (df["delta"] <= 0.55)].copy()
-    if calls.empty:
-        return _empty()
+    return _build_vertical(df, min_dte, max_dte, min_width, max_width,
+                           min_oi, earnings_dates,
+                           strategy="Bear Call Spread",
+                           opt_type="call", credit=True)
 
-    m = calls.merge(calls, on="expiration", suffixes=("_s", "_l"))
-    m = m[m["strike_s"] < m["strike_l"]]
-    w = m["strike_l"] - m["strike_s"]
-    m = m[w.between(min_width, max_width)]
-    if m.empty:
-        return _empty()
-
-    spot = float(df["spot"].iloc[0])
-    m["net_credit"] = m["mid_s"] - m["mid_l"]
-    m = m[m["net_credit"] > 0.01]
-    w = m["strike_l"] - m["strike_s"]
-    m["max_profit"] = m["net_credit"]
-    m["max_loss"] = w - m["net_credit"]
-    m = m[m["max_loss"] > 0.01]
-    m["risk_reward"] = m["max_profit"] / m["max_loss"]
-    m["breakeven1"] = m["strike_s"] + m["net_credit"]
-    m["ann_yield_pct"] = m["net_credit"] / m["max_loss"] * (365 / m["dte_s"]) * 100
-
-    rows = []
-    for _, r in m.iterrows():
-        T = _T(int(r["dte_s"]))
-        pop = 1 - prob_above(spot, r["breakeven1"], T, r["iv_s"])
-        legs = [{"type": "call", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
-                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
-                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
-                {"type": "call", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
-                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
-                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")}]
-        g = _spread_greeks(legs, spot, T)
-        rows.append({
-            "strategy": "Bear Call Spread", "expiration": r["expiration"],
-            "dte": int(r["dte_s"]), "spot": spot,
-            "short_strike": r["strike_s"], "long_strike": r["strike_l"],
-            "short_type": "call", "long_type": "call",
-            "short_mid": r["mid_s"], "long_mid": r["mid_l"],
-            "short_iv": r["iv_s"], "long_iv": r["iv_l"],
-            "net_credit": r["net_credit"],
-            "max_profit": r["max_profit"], "max_loss": r["max_loss"],
-            "risk_reward": r["risk_reward"], "pop": pop,
-            "ann_yield_pct": r["ann_yield_pct"],
-            "breakeven1": r["breakeven1"], "breakeven2": float("nan"),
-            "short_iv_excess": r.get("iv_excess_s", 0.0),
-            "short_oi": int(r["open_interest_s"]),
-            "long_oi": int(r["open_interest_l"]),
-            **g,
-        })
-    return _finalise(rows, spot, earnings_dates or [])
-
-
-# ── Builder: Bull Call Spread ─────────────────────────────────────────────────
 
 def build_bull_call_spreads(df, min_dte, max_dte, min_width, max_width,
                              min_oi, earnings_dates=None):
-    calls = df[(df["type"] == "call") &
-               (df["dte"] >= min_dte) & (df["dte"] <= max_dte) &
-               (df["open_interest"] >= min_oi) &
-               (df["delta"] >= 0.04) & (df["delta"] <= 0.70)].copy()
-    if calls.empty:
-        return _empty()
+    return _build_vertical(df, min_dte, max_dte, min_width, max_width,
+                           min_oi, earnings_dates,
+                           strategy="Bull Call Spread",
+                           opt_type="call", credit=False)
 
-    m = calls.merge(calls, on="expiration", suffixes=("_l", "_s"))
-    m = m[m["strike_l"] < m["strike_s"]]
-    w = m["strike_s"] - m["strike_l"]
-    m = m[w.between(min_width, max_width)]
-    if m.empty:
-        return _empty()
-
-    spot = float(df["spot"].iloc[0])
-    m["net_debit"] = m["mid_l"] - m["mid_s"]
-    m = m[m["net_debit"] > 0.01]
-    w = m["strike_s"] - m["strike_l"]
-    m["max_profit"] = w - m["net_debit"]
-    m["max_loss"] = m["net_debit"]
-    m = m[(m["max_profit"] > 0.01) & (m["max_loss"] > 0.01)]
-    m["risk_reward"] = m["max_profit"] / m["max_loss"]
-    m["breakeven1"] = m["strike_l"] + m["net_debit"]
-    m["ann_yield_pct"] = m["max_profit"] / m["max_loss"] * (365 / m["dte_l"]) * 100
-
-    rows = []
-    for _, r in m.iterrows():
-        T = _T(int(r["dte_l"]))
-        pop = prob_above(spot, r["breakeven1"], T, r["iv_l"])
-        legs = [{"type": "call", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
-                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
-                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")},
-                {"type": "call", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
-                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
-                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")}]
-        g = _spread_greeks(legs, spot, T)
-        rows.append({
-            "strategy": "Bull Call Spread", "expiration": r["expiration"],
-            "dte": int(r["dte_l"]), "spot": spot,
-            "short_strike": r["strike_s"], "long_strike": r["strike_l"],
-            "short_type": "call", "long_type": "call",
-            "short_mid": r["mid_s"], "long_mid": r["mid_l"],
-            "short_iv": r["iv_s"], "long_iv": r["iv_l"],
-            "net_credit": -r["net_debit"],
-            "max_profit": r["max_profit"], "max_loss": r["max_loss"],
-            "risk_reward": r["risk_reward"], "pop": pop,
-            "ann_yield_pct": r["ann_yield_pct"],
-            "breakeven1": r["breakeven1"], "breakeven2": float("nan"),
-            "short_iv_excess": r.get("iv_excess_s", 0.0),
-            "short_oi": int(r["open_interest_s"]),
-            "long_oi": int(r["open_interest_l"]),
-            **g,
-        })
-    return _finalise(rows, spot, earnings_dates or [])
-
-
-# ── Builder: Bear Put Spread ──────────────────────────────────────────────────
 
 def build_bear_put_spreads(df, min_dte, max_dte, min_width, max_width,
                             min_oi, earnings_dates=None):
-    puts = df[(df["type"] == "put") &
-              (df["dte"] >= min_dte) & (df["dte"] <= max_dte) &
-              (df["open_interest"] >= min_oi) &
-              (df["delta"].abs() >= 0.04) & (df["delta"].abs() <= 0.70)].copy()
-    if puts.empty:
-        return _empty()
-
-    m = puts.merge(puts, on="expiration", suffixes=("_l", "_s"))
-    m = m[m["strike_l"] > m["strike_s"]]
-    w = m["strike_l"] - m["strike_s"]
-    m = m[w.between(min_width, max_width)]
-    if m.empty:
-        return _empty()
-
-    spot = float(df["spot"].iloc[0])
-    m["net_debit"] = m["mid_l"] - m["mid_s"]
-    m = m[m["net_debit"] > 0.01]
-    w = m["strike_l"] - m["strike_s"]
-    m["max_profit"] = w - m["net_debit"]
-    m["max_loss"] = m["net_debit"]
-    m = m[(m["max_profit"] > 0.01) & (m["max_loss"] > 0.01)]
-    m["risk_reward"] = m["max_profit"] / m["max_loss"]
-    m["breakeven1"] = m["strike_l"] - m["net_debit"]
-    m["ann_yield_pct"] = m["max_profit"] / m["max_loss"] * (365 / m["dte_l"]) * 100
-
-    rows = []
-    for _, r in m.iterrows():
-        T = _T(int(r["dte_l"]))
-        pop = 1 - prob_above(spot, r["breakeven1"], T, r["iv_l"])
-        legs = [{"type": "put", "strike": r["strike_l"], "qty": +1,
-                 "entry_mid": r["mid_l"], "iv": r["iv_l"],
-                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
-                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")},
-                {"type": "put", "strike": r["strike_s"], "qty": -1,
-                 "entry_mid": r["mid_s"], "iv": r["iv_s"],
-                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
-                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")}]
-        g = _spread_greeks(legs, spot, T)
-        rows.append({
-            "strategy": "Bear Put Spread", "expiration": r["expiration"],
-            "dte": int(r["dte_l"]), "spot": spot,
-            "short_strike": r["strike_s"], "long_strike": r["strike_l"],
-            "short_type": "put", "long_type": "put",
-            "short_mid": r["mid_s"], "long_mid": r["mid_l"],
-            "short_iv": r["iv_s"], "long_iv": r["iv_l"],
-            "net_credit": -r["net_debit"],
-            "max_profit": r["max_profit"], "max_loss": r["max_loss"],
-            "risk_reward": r["risk_reward"], "pop": pop,
-            "ann_yield_pct": r["ann_yield_pct"],
-            "breakeven1": r["breakeven1"], "breakeven2": float("nan"),
-            "short_iv_excess": r.get("iv_excess_s", 0.0),
-            "short_oi": int(r["open_interest_s"]),
-            "long_oi": int(r["open_interest_l"]),
-            **g,
-        })
-    return _finalise(rows, spot, earnings_dates or [])
+    return _build_vertical(df, min_dte, max_dte, min_width, max_width,
+                           min_oi, earnings_dates,
+                           strategy="Bear Put Spread",
+                           opt_type="put", credit=False)
 
 
 # ── Builder: Iron Condor ──────────────────────────────────────────────────────
@@ -633,18 +491,10 @@ def build_iron_condors(df, min_dte, max_dte, min_width, max_width,
         pop = max(0.0, prob_above(spot, be1, T, iv_avg)
                   - prob_above(spot, be2, T, iv_avg))
         legs = [
-            {"type": "put",  "strike": r["strike_lp"], "qty": +1, "entry_mid": r["mid_lp"], "iv": r["iv_lp"],
-             "native_delta": _ng(r, "delta_lp"), "native_gamma": _ng(r, "gamma_lp"),
-             "native_theta": _ng(r, "theta_lp"), "native_vega":  _ng(r, "vega_lp")},
-            {"type": "put",  "strike": r["strike_sp"], "qty": -1, "entry_mid": r["mid_sp"], "iv": r["iv_sp"],
-             "native_delta": _ng(r, "delta_sp"), "native_gamma": _ng(r, "gamma_sp"),
-             "native_theta": _ng(r, "theta_sp"), "native_vega":  _ng(r, "vega_sp")},
-            {"type": "call", "strike": r["strike_sc"], "qty": -1, "entry_mid": r["mid_sc"], "iv": r["iv_sc"],
-             "native_delta": _ng(r, "delta_sc"), "native_gamma": _ng(r, "gamma_sc"),
-             "native_theta": _ng(r, "theta_sc"), "native_vega":  _ng(r, "vega_sc")},
-            {"type": "call", "strike": r["strike_lc"], "qty": +1, "entry_mid": r["mid_lc"], "iv": r["iv_lc"],
-             "native_delta": _ng(r, "delta_lc"), "native_gamma": _ng(r, "gamma_lc"),
-             "native_theta": _ng(r, "theta_lc"), "native_vega":  _ng(r, "vega_lc")},
+            _make_leg(r, "put",  +1, "_lp"),
+            _make_leg(r, "put",  -1, "_sp"),
+            _make_leg(r, "call", -1, "_sc"),
+            _make_leg(r, "call", +1, "_lc"),
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -733,18 +583,10 @@ def build_iron_butterflies(df, min_dte, max_dte, min_width, max_width,
                       - prob_above(spot, be2, T, iv_body))
 
             legs = [
-                {"type": "put",  "strike": float(lp_row["strike"]), "qty": +1, "entry_mid": float(lp_row["mid"]), "iv": float(lp_row["iv"]),
-                 "native_delta": _ng(lp_row, "delta"), "native_gamma": _ng(lp_row, "gamma"),
-                 "native_theta": _ng(lp_row, "theta"), "native_vega":  _ng(lp_row, "vega")},
-                {"type": "put",  "strike": float(sp_row["strike"]), "qty": -1, "entry_mid": float(sp_row["mid"]), "iv": float(sp_row["iv"]),
-                 "native_delta": _ng(sp_row, "delta"), "native_gamma": _ng(sp_row, "gamma"),
-                 "native_theta": _ng(sp_row, "theta"), "native_vega":  _ng(sp_row, "vega")},
-                {"type": "call", "strike": float(sc_row["strike"]), "qty": -1, "entry_mid": float(sc_row["mid"]), "iv": float(sc_row["iv"]),
-                 "native_delta": _ng(sc_row, "delta"), "native_gamma": _ng(sc_row, "gamma"),
-                 "native_theta": _ng(sc_row, "theta"), "native_vega":  _ng(sc_row, "vega")},
-                {"type": "call", "strike": float(lc_row["strike"]), "qty": +1, "entry_mid": float(lc_row["mid"]), "iv": float(lc_row["iv"]),
-                 "native_delta": _ng(lc_row, "delta"), "native_gamma": _ng(lc_row, "gamma"),
-                 "native_theta": _ng(lc_row, "theta"), "native_vega":  _ng(lc_row, "vega")},
+                _make_leg(lp_row, "put",  +1),
+                _make_leg(sp_row, "put",  -1),
+                _make_leg(sc_row, "call", -1),
+                _make_leg(lc_row, "call", +1),
             ]
             g = _spread_greeks(legs, spot, T)
 
@@ -826,15 +668,9 @@ def build_jade_lizards(df, min_dte, max_dte, min_width, max_width,
         T = _T(int(r["dte"]))
         pop = prob_above(spot, be1, T, float(r["iv"]))
         legs = [
-            {"type": "put",  "strike": float(r["strike"]),    "qty": -1, "entry_mid": float(r["mid"]),    "iv": float(r["iv"]),
-             "native_delta": _ng(r, "delta"),    "native_gamma": _ng(r, "gamma"),
-             "native_theta": _ng(r, "theta"),    "native_vega":  _ng(r, "vega")},
-            {"type": "call", "strike": float(r["strike_sc"]), "qty": -1, "entry_mid": float(r["mid_sc"]), "iv": float(r["iv_sc"]),
-             "native_delta": _ng(r, "delta_sc"), "native_gamma": _ng(r, "gamma_sc"),
-             "native_theta": _ng(r, "theta_sc"), "native_vega":  _ng(r, "vega_sc")},
-            {"type": "call", "strike": float(r["strike_lc"]), "qty": +1, "entry_mid": float(r["mid_lc"]), "iv": float(r["iv_lc"]),
-             "native_delta": _ng(r, "delta_lc"), "native_gamma": _ng(r, "gamma_lc"),
-             "native_theta": _ng(r, "theta_lc"), "native_vega":  _ng(r, "vega_lc")},
+            _make_leg(r, "put",  -1),
+            _make_leg(r, "call", -1, "_sc"),
+            _make_leg(r, "call", +1, "_lc"),
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -933,16 +769,8 @@ def build_calendar_spreads(df, min_dte, max_dte, min_width, max_width,
 
                     T_back = _T(dte_back)
                     legs = [
-                        {"type": opt_type, "strike": float(f_row["strike"]), "qty": -1,
-                         "entry_mid": float(f_row["mid"]), "iv": float(f_row["iv"]),
-                         "T": T,
-                         "native_delta": _ng(f_row, "delta"), "native_gamma": _ng(f_row, "gamma"),
-                         "native_theta": _ng(f_row, "theta"), "native_vega":  _ng(f_row, "vega")},
-                        {"type": opt_type, "strike": float(b_row["strike"]), "qty": +1,
-                         "entry_mid": float(b_row["mid"]), "iv": float(b_row["iv"]),
-                         "T": T_back,
-                         "native_delta": _ng(b_row, "delta"), "native_gamma": _ng(b_row, "gamma"),
-                         "native_theta": _ng(b_row, "theta"), "native_vega":  _ng(b_row, "vega")},
+                        _make_leg(f_row, opt_type, -1, T=T),
+                        _make_leg(b_row, opt_type, +1, T=T_back),
                     ]
                     g = _spread_greeks(legs, spot, T)
                     rows.append({
@@ -1030,18 +858,9 @@ def build_ratio_spreads(df, min_dte, max_dte, min_width, max_width,
                 be1 = upper_be
 
             legs = [
-                {"type": opt_type, "strike": float(r["strike_l"]), "qty": +1,
-                 "entry_mid": float(r["mid_l"]), "iv": float(r["iv_l"]),
-                 "native_delta": _ng(r, "delta_l"), "native_gamma": _ng(r, "gamma_l"),
-                 "native_theta": _ng(r, "theta_l"), "native_vega":  _ng(r, "vega_l")},
-                {"type": opt_type, "strike": float(r["strike_s"]), "qty": -1,
-                 "entry_mid": float(r["mid_s"]), "iv": float(r["iv_s"]),
-                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
-                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
-                {"type": opt_type, "strike": float(r["strike_s"]), "qty": -1,
-                 "entry_mid": float(r["mid_s"]), "iv": float(r["iv_s"]),
-                 "native_delta": _ng(r, "delta_s"), "native_gamma": _ng(r, "gamma_s"),
-                 "native_theta": _ng(r, "theta_s"), "native_vega":  _ng(r, "vega_s")},
+                _make_leg(r, opt_type, +1, "_l"),
+                _make_leg(r, opt_type, -1, "_s"),
+                _make_leg(r, opt_type, -1, "_s"),
             ]
             g = _spread_greeks(legs, spot, T)
             label = "Call" if opt_type == "call" else "Put"
@@ -1112,14 +931,8 @@ def build_long_straddles(df, min_dte, max_dte, min_width, max_width,
         pop = min(max(pop, 0.0), 1.0)
 
         legs = [
-            {"type": "call", "strike": K, "qty": +1,
-             "entry_mid": float(r["mid_c"]), "iv": iv_c,
-             "native_delta": _ng(r, "delta_c"), "native_gamma": _ng(r, "gamma_c"),
-             "native_theta": _ng(r, "theta_c"), "native_vega":  _ng(r, "vega_c")},
-            {"type": "put",  "strike": K, "qty": +1,
-             "entry_mid": float(r["mid_p"]), "iv": iv_p,
-             "native_delta": _ng(r, "delta_p"), "native_gamma": _ng(r, "gamma_p"),
-             "native_theta": _ng(r, "theta_p"), "native_vega":  _ng(r, "vega_p")},
+            _make_leg(r, "call", +1, "_c", strike=K),
+            _make_leg(r, "put",  +1, "_p", strike=K),
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -1190,14 +1003,8 @@ def build_long_strangles(df, min_dte, max_dte, min_width, max_width,
         pop = min(max(pop, 0.0), 1.0)
 
         legs = [
-            {"type": "call", "strike": K_c, "qty": +1,
-             "entry_mid": float(r["mid_c"]), "iv": iv_c,
-             "native_delta": _ng(r, "delta_c"), "native_gamma": _ng(r, "gamma_c"),
-             "native_theta": _ng(r, "theta_c"), "native_vega":  _ng(r, "vega_c")},
-            {"type": "put",  "strike": K_p, "qty": +1,
-             "entry_mid": float(r["mid_p"]), "iv": iv_p,
-             "native_delta": _ng(r, "delta_p"), "native_gamma": _ng(r, "gamma_p"),
-             "native_theta": _ng(r, "theta_p"), "native_vega":  _ng(r, "vega_p")},
+            _make_leg(r, "call", +1, "_c"),
+            _make_leg(r, "put",  +1, "_p"),
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({
@@ -1270,14 +1077,8 @@ def build_risk_reversals(df, min_dte, max_dte, min_width, max_width,
         pop = min(max(pop, 0.0), 1.0)
 
         legs = [
-            {"type": "call", "strike": K_c, "qty": +1,
-             "entry_mid": float(r["mid_c"]), "iv": iv_c,
-             "native_delta": _ng(r, "delta_c"), "native_gamma": _ng(r, "gamma_c"),
-             "native_theta": _ng(r, "theta_c"), "native_vega":  _ng(r, "vega_c")},
-            {"type": "put",  "strike": K_p, "qty": -1,
-             "entry_mid": float(r["mid_p"]), "iv": iv_p,
-             "native_delta": _ng(r, "delta_p"), "native_gamma": _ng(r, "gamma_p"),
-             "native_theta": _ng(r, "theta_p"), "native_vega":  _ng(r, "vega_p")},
+            _make_leg(r, "call", +1, "_c"),
+            _make_leg(r, "put",  -1, "_p"),
         ]
         g = _spread_greeks(legs, spot, T)
         rows.append({

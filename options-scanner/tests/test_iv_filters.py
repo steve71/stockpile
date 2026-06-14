@@ -46,6 +46,44 @@ def test_empty_config_is_identity():
     assert len(iv_filters.apply(df, ())) == len(df)
 
 
+def test_default_config_includes_exclude_earnings():
+    """exclude_earnings joined the default filter set 2026-06-10."""
+    assert ("exclude_earnings", frozenset()) in iv_filters.DEFAULT_CONFIG
+
+
+# ── sanity + with_sanity ─────────────────────────────────────────────────────
+
+def test_sanity_drops_junk_iv_and_expired_rows():
+    df = _df().assign(iv=[0.30, 0.005, 6.0, 0.30], dte=[30, 30, 30, 0])
+    out = iv_filters.apply(df, (("sanity", frozenset()),))
+    assert list(out.index) == [0]
+
+
+def test_with_sanity_prepends_once():
+    config = (("otm_only", frozenset()),)
+    once = iv_filters.with_sanity(config)
+    assert once[0][0] == "sanity" and len(once) == 2
+    assert iv_filters.with_sanity(once) == once
+
+
+# ── fresh_quotes ─────────────────────────────────────────────────────────────
+
+def test_fresh_quotes_drops_only_known_stale_rows():
+    df = _df().assign(
+        last_trade_days=[0.5, 10.0, 10.0, float("nan")],
+        volume=[0, 0, 25, 0],
+    )
+    out = iv_filters.apply(df, (("fresh_quotes", frozenset()),))
+    # Kept: traded recently / traded today / unknown age. Dropped: row 1.
+    assert list(out.index) == [0, 2, 3]
+
+
+def test_fresh_quotes_noop_without_column():
+    df = _df()
+    out = iv_filters.apply(df, (("fresh_quotes", frozenset()),))
+    assert len(out) == len(df)
+
+
 # ── funnel ────────────────────────────────────────────────────────────────────
 
 def test_funnel_final_remaining_matches_apply():

@@ -26,6 +26,33 @@ SurfaceFilterConfig = tuple[tuple[str, frozenset], ...]
 
 # ── Filter functions ──────────────────────────────────────────────────────────
 
+def _sanity(df: pd.DataFrame, iv_floor: float = 0.02,
+            iv_ceiling: float = 5.0) -> pd.DataFrame:
+    """Baseline validity: IV above the noise floor and below an
+    absurdity ceiling (yfinance occasionally emits 500%+ junk), DTE > 0.
+
+    Always prepended to the surface pipeline via `with_sanity` — it
+    lives in the registry (rather than hard-coded in iv_surface) so
+    the diagnostics funnel reports its drop count like any other stage.
+    """
+    return df[(df["iv"] > iv_floor) & (df["iv"] < iv_ceiling)
+              & (df["dte"] > 0)]
+
+
+def _fresh_quotes(df: pd.DataFrame, max_age_days: float = 3.0) -> pd.DataFrame:
+    """Drop rows whose last trade is older than max_age_days and that
+    show no volume today — their broker IV is likely stale.
+
+    Rows with unknown age (Schwab/moomoo don't populate
+    last_trade_days) pass through: only known-stale quotes are dropped.
+    """
+    if "last_trade_days" not in df.columns:
+        return df
+    age = df["last_trade_days"]
+    traded_today = df["volume"] > 0 if "volume" in df.columns else False
+    return df[age.isna() | (age <= max_age_days) | traded_today]
+
+
 def _otm_only(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only OTM options: calls where K > spot, puts where K < spot."""
     calls = (df["type"] == "call") & (df["strike"] > df["spot"])
@@ -69,6 +96,16 @@ def _exclude_earnings(df: pd.DataFrame) -> pd.DataFrame:
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 REGISTRY: dict[str, dict] = {
+    "sanity": {
+        "fn":       _sanity,
+        "defaults": {"iv_floor": 0.02, "iv_ceiling": 5.0},
+        "label":    "IV in (2%, 500%) and DTE > 0",
+    },
+    "fresh_quotes": {
+        "fn":       _fresh_quotes,
+        "defaults": {"max_age_days": 3.0},
+        "label":    "Fresh quotes — traded recently",
+    },
     "otm_only": {
         "fn":       _otm_only,
         "defaults": {},
@@ -96,16 +133,33 @@ REGISTRY: dict[str, dict] = {
     },
 }
 
-# Default: OTM-only + spread ≤ 50% + delta 0.10–0.95. The 0.10 floor
-# drops far-OTM wings (penny premium, wide spreads, unreliable broker
-# IV) that otherwise dominate the surface curvature; 0.95 is a guard
-# for the non-default case where OTM-only is off (it never binds while
-# OTM-only caps |delta| near 0.5).
+# Default: OTM-only + spread ≤ 50% + delta 0.10–0.95 + earnings
+# excluded. The 0.10 floor drops far-OTM wings (penny premium, wide
+# spreads, unreliable broker IV) that otherwise dominate the surface
+# curvature; 0.95 is a guard for the non-default case where OTM-only
+# is off (it never binds while OTM-only caps |delta| near 0.5).
+# exclude_earnings joined the defaults 2026-06-10: earnings-spanning
+# contracts carry legitimate jump premium that pulls the surface up
+# and distorts every other contract's excess (they still receive
+# iv_fitted/iv_excess from the cleaner fit).
 DEFAULT_CONFIG: SurfaceFilterConfig = (
-    ("otm_only",    frozenset()),
-    ("spread_pct",  frozenset({("max_pct", 0.50)})),
-    ("delta_range", frozenset({("lo", 0.10), ("hi", 0.95)})),
+    ("otm_only",         frozenset()),
+    ("spread_pct",       frozenset({("max_pct", 0.50)})),
+    ("delta_range",      frozenset({("lo", 0.10), ("hi", 0.95)})),
+    ("exclude_earnings", frozenset()),
 )
+
+
+def with_sanity(config: SurfaceFilterConfig) -> SurfaceFilterConfig:
+    """Prepend the always-on sanity filter unless already present.
+
+    The surface pipeline (and its diagnostics funnel) route every
+    config through this, so the baseline-validity stage is applied —
+    and reported — exactly once, however the config was built.
+    """
+    if any(name == "sanity" for name, _ in config):
+        return config
+    return (("sanity", frozenset()),) + tuple(config)
 
 
 # ── Apply ─────────────────────────────────────────────────────────────────────

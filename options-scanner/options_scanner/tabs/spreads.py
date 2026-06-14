@@ -30,7 +30,9 @@ from options_scanner.display.spot_meta import (
 from options_scanner.fetch import fetch_and_enrich
 from options_scanner.format import fmt_strike
 from options_scanner.mc_ui import LegSpec, position_from_legs, render_mc_panel
-from options_scanner.ui_theme import metric_card, section_header
+from options_scanner.ui_theme import (
+    metric_card, render_schwab_reauth_hint, section_header,
+)
 
 
 _GREEK_HELP = {
@@ -344,6 +346,10 @@ def _render_view(
 
         if err:
             st.error(err)
+            _scfg = st.session_state.get("schwab_config") or {}
+            render_schwab_reauth_hint(st.session_state.get("data_source", "yahoo"),
+                                      key="schwab_reauth_spreads",
+                                      token_file=_scfg.get("token_file"))
             st.session_state.pop(session_key, None)
             return
         if df.empty:

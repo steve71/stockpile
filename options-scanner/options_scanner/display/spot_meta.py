@@ -70,7 +70,8 @@ def fetch_spot_meta(ticker: str, data_source: str) -> dict:
             cfg.get("token_file", "~/.config/schwab-token.json"),
         )
         sym = normalize_ticker_schwab(ticker)
-        resp = client.get_quote(sym)
+        # Plural endpoint: get_quote 404s on slash symbols (BRK/B).
+        resp = client.get_quotes([sym])
         resp.raise_for_status()
         quote = resp.json().get(sym, {}).get("quote", {})
         pct = quote.get("netPercentChange")

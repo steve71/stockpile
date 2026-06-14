@@ -24,7 +24,7 @@ from options_scanner.ui_theme import (
 from options_scanner.display.scan_stamp import PROVIDER_LABELS, PROVIDER_COLORS
 from options_scanner.tabs.gex import tab_gex
 from options_scanner.tabs.live_charts import tab_live_charts
-from options_scanner.tabs.portfolio import tab_portfolio
+from options_scanner.tabs.portfolio import tab_portfolio, tab_watchlist
 from options_scanner.tabs.single import tab_single
 from options_scanner.tabs.spreads import tab_directional, tab_neutral, tab_spreads
 
@@ -211,6 +211,25 @@ st.session_state["data_source"] = data_source
 st.session_state["schwab_config"] = _cfg_schwab if data_source == "schwab" else None
 st.session_state["moomoo_config"] = _cfg_moomoo if data_source == "moomoo" else None
 
+# Pick up a re-authenticated Schwab token without a server restart. A fresh
+# token (re-auth button or schwab_auth.py) rewrites the token file; the
+# client cache already rebuilds on the new mtime, but the @st.cache_data
+# chain/spot fetches would keep serving the failure they cached under
+# identical args until their TTL — which looked like "must restart the
+# server". Detect the mtime change here and drop those caches so the next
+# scan uses the new token.
+if data_source == "schwab" and _cfg_schwab:
+    from stocks_shared.schwab_live import token_mtime as _schwab_token_mtime
+    _cur_tok_mtime = _schwab_token_mtime(_cfg_schwab.get("token_file", ""))
+    if ("_schwab_token_mtime" in st.session_state
+            and st.session_state["_schwab_token_mtime"] != _cur_tok_mtime):
+        from options_scanner.fetch import fetch_and_enrich, fetch_position
+        from options_scanner.display.spot_meta import fetch_spot_meta
+        fetch_and_enrich.clear()
+        fetch_position.clear()
+        fetch_spot_meta.clear()
+    st.session_state["_schwab_token_mtime"] = _cur_tok_mtime
+
 
 # ── Page header chips ────────────────────────────────────────────────────
 # Sidebar: an "About" panel — the legacy theme picker is gone (we now ship
@@ -294,22 +313,25 @@ st.markdown(
 )
 
 (
-    panel_single, panel_gex, panel_portfolio,
+    panel_single, panel_watchlist, panel_portfolio, panel_gex,
     panel_spreads, panel_directional, panel_neutral,
     panel_live,
 ) = st.tabs(
-    ["Single Ticker", "GEX", "Portfolio",
+    ["Single Ticker", "Watchlist", "Portfolio", "GEX",
      "Spreads", "Directional", "Neutral", "Live Charts"]
 )
 
 with panel_single:
     tab_single()
 
-with panel_gex:
-    tab_gex()
+with panel_watchlist:
+    tab_watchlist()
 
 with panel_portfolio:
     tab_portfolio()
+
+with panel_gex:
+    tab_gex()
 
 with panel_spreads:
     tab_spreads()

@@ -67,7 +67,7 @@ def patch_yahoo(monkeypatch):
     """
     def _setup(exp_to_chain: dict, spot: float = 100.0):
         import yfinance as yf
-        monkeypatch.setattr(chain, "fetch_live_price", lambda t: spot)
+        monkeypatch.setattr(chain, "fetch_live_price", lambda t, **kw: spot)
         monkeypatch.setattr(chain, "normalize_ticker", lambda t: t)
         monkeypatch.setattr(yf, "Ticker", _mock_yf_ticker(exp_to_chain))
 
@@ -262,7 +262,7 @@ def test_missing_spot_raises(patch_yahoo, monkeypatch):
     """If `fetch_live_price` returns falsy, we raise rather than silently
     producing nonsense rows. (Patch override here — the fixture's spot
     default is fine for other tests.)"""
-    monkeypatch.setattr(chain, "fetch_live_price", lambda t: None)
+    monkeypatch.setattr(chain, "fetch_live_price", lambda t, **kw: None)
     monkeypatch.setattr(chain, "normalize_ticker", lambda t: t)
     with pytest.raises(ValueError):
         chain._fetch_chain_yahoo("AAPL", min_dte=0, max_dte=60)

@@ -70,9 +70,12 @@ uv run options-scanner/run_scanner.py $ARGUMENTS
 ### Pluggable IV surface
 `--preset {current,v2}` — surface-fit preset (default: current).
 `--algorithm {global_poly,per_expiration}` — override the preset's
-fit algorithm. `--fit-weights {none,oi,inv_spread}` — regression
-weighting. `--score {raw_pp,zscore,relative,composite_exec,vrp,
-percentile}` — override the ranking score.
+fit algorithm. `--fit-weights {none,oi,inv_spread,vega}` — regression
+weighting. `--robust {none,huber,tukey}` — robust fit: downweight
+(huber) or reject (tukey) outliers so a stale print can't drag the
+surface toward itself. `--score {raw_pp,zscore,relative,
+composite_exec,vrp,percentile}` — override the ranking score.
+Both presets exclude earnings-spanning options from the fit.
 
 ## Reading IV+pp
 

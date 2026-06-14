@@ -24,6 +24,11 @@ Accessibility commitments enforced via this module:
 
 from __future__ import annotations
 
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 from typing import Literal
 
 import streamlit as st
@@ -733,21 +738,103 @@ def badge(
     return f"<span class='osc-badge osc-badge-{v}'>{text}</span>"
 
 
-def render_schwab_reauth_hint(provider: str) -> None:
+_SCHWAB_AUTH_CMD = "uv run options-scanner/schwab_auth.py"
+
+
+def _launch_schwab_auth_terminal() -> str | None:
+    """Open a new terminal window running the Schwab re-auth script.
+
+    The terminal opens on the machine running this Streamlit process —
+    correct for local use; on a remote/cloud host the user must run the
+    command (or its --manual variant) themselves. Returns an error string
+    when the platform has no known terminal or the launch fails, else None.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(f'start "Schwab re-auth" cmd /k {_SCHWAB_AUTH_CMD}',
+                             shell=True, cwd=repo_root)
+        elif sys.platform == "darwin":
+            script = (f'tell application "Terminal" to do script '
+                      f'"cd {shlex.quote(str(repo_root))} && {_SCHWAB_AUTH_CMD}"')
+            subprocess.Popen(["osascript", "-e", script])
+        else:
+            for term, flag in (("x-terminal-emulator", "-e"),
+                               ("gnome-terminal", "--"),
+                               ("konsole", "-e"), ("xterm", "-e")):
+                if shutil.which(term):
+                    subprocess.Popen(
+                        [term, flag, "bash", "-lc",
+                         f"{_SCHWAB_AUTH_CMD}; exec bash"],
+                        cwd=repo_root)
+                    break
+            else:
+                return "no terminal emulator found"
+        return None
+    except Exception as exc:  # noqa: BLE001 — report any launch failure inline
+        return str(exc)
+
+
+def _reauth_clicked() -> None:
+    """on_click callback: launch the terminal and toast the outcome.
+
+    A callback (not an inline `if st.button(...)`) because some call sites
+    render the hint inside a scan-error path that isn't re-executed on the
+    button's rerun — callbacks still fire, an inline check would not.
+    """
+    err = _launch_schwab_auth_terminal()
+    if err:
+        st.toast(f"Couldn't open a terminal automatically ({err}) — "
+                 "run the command shown manually.")
+    else:
+        st.toast("Terminal launched — finish the Schwab login there, "
+                 "then rescan.")
+
+
+def render_schwab_reauth_hint(provider: str, key: str = "schwab_reauth",
+                              token_file: str | None = None) -> None:
     """Show an actionable re-auth hint next to a Schwab fetch error.
 
     The saved Schwab token has a 7-day TTL; once it lapses, price/chain
     fetches fail (most commonly "Could not fetch live price …"). When the
     active data source is Schwab, surface the fix — the auth command, run
-    from the repo root — so users don't have to remember it. No-op for any
-    other provider.
+    from the repo root, plus a button that opens a terminal already running
+    it — so users don't have to remember it. No-op for any other provider.
+
+    When `token_file` is given, the token's recorded login timestamp makes
+    the message definitive: past the TTL it *is* expired; well inside it,
+    expiry is ruled out and the wording points elsewhere.
+
+    `key` must be unique per call site (the tabs all render every run).
     """
     if provider != "schwab":
         return
-    st.info("Using **Schwab**? A common cause is the saved token expiring "
-            "(7-day limit). From your **stockpile** directory, re-authenticate "
-            "in a terminal, then rescan:")
-    st.code("uv run options-scanner/schwab_auth.py", language="bash")
+
+    from stocks_shared.schwab_live import (
+        SCHWAB_REFRESH_TOKEN_TTL_DAYS, token_age_days,
+    )
+    age = token_age_days(token_file) if token_file else None
+
+    if age is not None and age >= SCHWAB_REFRESH_TOKEN_TTL_DAYS:
+        st.error(f"Your saved Schwab token is **{age:.1f} days old** — past "
+                 f"Schwab's {SCHWAB_REFRESH_TOKEN_TTL_DAYS:.0f}-day limit, so "
+                 "it has expired. From your **stockpile** directory, "
+                 "re-authenticate in a terminal, then rescan:")
+    elif age is not None:
+        st.info(f"Your saved Schwab token is only **{age:.1f} days old** "
+                f"({SCHWAB_REFRESH_TOKEN_TTL_DAYS:.0f}-day limit), so token "
+                "expiry is likely **not** the cause — check the ticker "
+                "symbols, DTE window, and your network first. If Schwab "
+                "fetches still fail, re-authenticate and rescan:")
+    else:
+        st.info("Using **Schwab**? A common cause is the saved token expiring "
+                "(7-day limit). From your **stockpile** directory, "
+                "re-authenticate in a terminal, then rescan:")
+    st.code(_SCHWAB_AUTH_CMD, language="bash")
+    st.button("Re-authenticate now", key=key, on_click=_reauth_clicked,
+              help="Opens a terminal window running the command above — "
+                   "on the machine running the scanner, so for remote "
+                   "hosts run it there manually instead.")
 
 
 def metric_card(

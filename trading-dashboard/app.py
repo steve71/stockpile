@@ -1,10 +1,19 @@
-import time, hashlib, tomllib
+import os, time, hashlib, tomllib
 from pathlib import Path
 from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 from data_source import fetch_ohlcv, fetch_schwab_live_price, _DATASOURCE_REGISTRY
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:5000", "http://127.0.0.1:5000"]}})
+
+def _dashboard_port():
+    """Dashboard TCP port. Override with OSC_DASHBOARD_PORT on hosts where
+    5000 is already taken; the scanner's Live Charts embed reads the same var."""
+    raw = os.environ.get("OSC_DASHBOARD_PORT", "").strip()
+    try: p = int(raw)
+    except ValueError: return 5000
+    return p if 1 <= p <= 65535 else 5000
+PORT = _dashboard_port()
+CORS(app, resources={r"/api/*": {"origins": [f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"]}})
 _CACHE = {}
 _CACHE_TTL = {"1m":20,"3m":30,"5m":45,"15m":90,"30m":150,"1h":300,"4h":600,"1d":900,"1w":1800,"1M":3600}
 _PRICE_TTL = 300
@@ -132,4 +141,4 @@ def sources():
         panes=layout['panes'],
     )
 
-if __name__ == '__main__': app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
+if __name__ == '__main__': app.run(debug=False, host='0.0.0.0', port=PORT, threaded=True)

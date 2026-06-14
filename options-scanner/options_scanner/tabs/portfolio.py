@@ -1,26 +1,34 @@
-"""Portfolio tab: upload a brokerage CSV, scan every position.
+"""Portfolio and Watchlist tabs — one shared scan engine, two entry points.
 
-For each ticker in the CSV: fetch the option chain, filter by DTE/OI/volume/
-delta, and surface the rank-1 candidate as an explicit action card. Covered
-positions also get a roll-close lookup for the existing short option.
+`tab_portfolio()` scans every position in an uploaded brokerage CSV;
+`tab_watchlist()` scans a typed/saved basket of tickers (best-option
+only — no positions, so no roll context). Both share `_render_scan_tab`:
+fetch each ticker's chain, filter by DTE/OI/volume/delta, render the
+cross-ticker leaderboard and a per-ticker section with action cards.
 
-Controls:
+Controls (portfolio mode):
   Option type  — Calls / Puts / Both
   Scan mode    — Roll (surface roll candidates) / Best option (just top pick)
   Positions    — Open only (shares > 0) / All tickers (every ticker in CSV)
   Format       — auto-detected on upload; user can override
+Watchlist mode swaps Scan mode/Positions for a Sell/Buy direction toggle
+and the saved-watchlist load/save row.
 
-The tab keeps its CSV validation helpers (_validate_csv, _show_validation)
-module-private — they're only meaningful in this upload context.
+The module keeps its CSV validation helpers (_validate_csv,
+_show_validation) private — they're only meaningful in the upload context.
 """
 
 from __future__ import annotations
 
 import os
 import tempfile
+import time
 from datetime import date, datetime
 
+import pandas as pd
 import streamlit as st
+
+from stocks_shared.yahoo import RateLimitError
 
 from options_scanner.display.iv_chart import show_iv_chart
 from options_scanner.display.leaderboard import render_leaderboard
@@ -38,6 +46,16 @@ from options_scanner.ui_theme import (
     badge, metric_card, render_schwab_reauth_hint, section_header,
 )
 from options_scanner import watchlists
+
+# Yahoo rate-limit handling: when a fetch raises RateLimitError, the scan
+# waits once and retries that ticker rather than failing it — large
+# baskets may pause this way several times and still finish. But if a
+# ticker is *still* throttled after its wait, Yahoo is persistently
+# rate-limiting the whole IP (it throttles per-IP, not per-symbol), so
+# further waiting is pointless: the scan stops waiting and fails the
+# remaining throttled tickers fast. Worst case ≈ one wait, not minutes
+# per ticker.
+_RL_WAIT_SECONDS = 60
 
 
 @st.cache_data(show_spinner=False)
@@ -250,24 +268,41 @@ def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
 
 
 def tab_portfolio() -> None:
-    section_header(
-        title="Portfolio scan",
-        subtitle=(
-            "Upload a brokerage CSV — we'll surface roll candidates and rich "
-            "options ticker-by-ticker."
-        ),
-        eyebrow="STEP 01 · INPUT",
-    )
+    """Brokerage-CSV scan: every position in an export."""
+    _render_scan_tab(is_watchlist=False, k="p")
 
-    # ── Input source: brokerage CSV (today's flow) vs typed watchlist ─────────
-    input_source = st.radio(
-        "Input source", ["Brokerage CSV", "Watchlist"],
-        horizontal=True, key="p_input_source",
-        help="Brokerage CSV: scan every position in an export. "
-             "Watchlist: type a basket of tickers — no broker account or "
-             "CSV needed (best-option scan only).",
-    )
-    is_watchlist = input_source == "Watchlist"
+
+def tab_watchlist() -> None:
+    """Typed-basket scan: best option across a saved or ad-hoc list."""
+    _render_scan_tab(is_watchlist=True, k="w")
+
+
+def _render_scan_tab(is_watchlist: bool, k: str) -> None:
+    """Shared engine behind the Portfolio and Watchlist tabs.
+
+    Both tabs render every script run, so every widget and session key
+    that appears in both modes is prefixed with `k` ("p" portfolio /
+    "w" watchlist) to keep them collision-free and independent.
+    """
+    if is_watchlist:
+        section_header(
+            title="Watchlist scan",
+            subtitle=(
+                "Type or load a basket of tickers — we'll rank the richest "
+                "(or cheapest) options across the lot. No broker account "
+                "needed."
+            ),
+            eyebrow="STEP 01 · INPUT",
+        )
+    else:
+        section_header(
+            title="Portfolio scan",
+            subtitle=(
+                "Upload a brokerage CSV — we'll surface roll candidates and rich "
+                "options ticker-by-ticker."
+            ),
+            eyebrow="STEP 01 · INPUT",
+        )
 
     uploaded = None
     brokerage = None
@@ -291,34 +326,34 @@ def tab_portfolio() -> None:
 
         def _apply_watchlist() -> None:
             entry = next((e for e in _saved
-                          if e["name"] == st.session_state.get("p_wl_saved")), None)
+                          if e["name"] == st.session_state.get(f"{k}_wl_saved")), None)
             if entry is None:
                 return
             _step = 0.05
             _dmin = round(round(float(entry.get("delta_min", 0.10)) / _step) * _step, 10)
             _dmax = round(round(float(entry.get("delta_max", 0.70)) / _step) * _step, 10)
-            st.session_state["p_watchlist"] = ", ".join(entry["tickers"])
+            st.session_state[f"{k}_watchlist"] = ", ".join(entry["tickers"])
             # Fill the name field too, so Save (re-save) and Delete light up
             # for the loaded watchlist.
-            st.session_state["p_wl_name"] = entry["name"]
-            st.session_state["p_min_dte"]  = max(1, int(entry.get("min_dte", 30)))
-            st.session_state["p_max_dte"]  = max(1, int(entry.get("max_dte", 90)))
-            st.session_state["p_min_oi"]   = max(0, int(entry.get("min_oi", 25)))
-            st.session_state["p_min_vol"]  = max(0, int(entry.get("min_vol", 1)))
-            st.session_state["p_delta"]    = (_dmin, _dmax)
-            st.session_state["p_top"]      = max(1, int(entry.get("top_n", 5)))
-            st.session_state["p_opt_type"] = entry.get("option_type", "Calls")
-            st.session_state["p_action"] = (
+            st.session_state[f"{k}_wl_name"] = entry["name"]
+            st.session_state[f"{k}_min_dte"]  = max(1, int(entry.get("min_dte", 30)))
+            st.session_state[f"{k}_max_dte"]  = max(1, int(entry.get("max_dte", 90)))
+            st.session_state[f"{k}_min_oi"]   = max(0, int(entry.get("min_oi", 25)))
+            st.session_state[f"{k}_min_vol"]  = max(0, int(entry.get("min_vol", 1)))
+            st.session_state[f"{k}_delta"]    = (_dmin, _dmax)
+            st.session_state[f"{k}_top"]      = max(1, int(entry.get("top_n", 5)))
+            st.session_state[f"{k}_opt_type"] = entry.get("option_type", "Calls")
+            st.session_state[f"{k}_action"] = (
                 "Buy (IV-cheap candidates)" if entry.get("buy")
                 else "Sell (IV-rich candidates)")
             # Reset to placeholder (allowed inside on_change) so the same
             # pick can be re-applied later after manual edits.
-            st.session_state["p_wl_saved"] = _wl_placeholder
+            st.session_state[f"{k}_wl_saved"] = _wl_placeholder
 
         _tk_col, _mid_col, _btn_col = st.columns([4, 2, 1])
         with _tk_col:
             _wl_text = st.text_area(
-                "Tickers", key="p_watchlist", height=160,
+                "Tickers", key=f"{k}_watchlist", height=160,
                 placeholder="AMD, NVDA, AAPL  (commas, spaces, or new lines)",
                 help="Separate tickers by comma, space, or new line. Append ! "
                      "to a symbol to disable index normalization.",
@@ -329,11 +364,11 @@ def tab_portfolio() -> None:
             st.selectbox(
                 "Saved watchlists",
                 [_wl_placeholder] + [e["name"] for e in _saved],
-                index=0, key="p_wl_saved", on_change=_apply_watchlist,
+                index=0, key=f"{k}_wl_saved", on_change=_apply_watchlist,
                 help="Load a saved basket and the filters it was saved with.",
             )
             _wl_name = st.text_input(
-                "Save as", key="p_wl_name",
+                "Save as", key=f"{k}_wl_name",
                 placeholder="e.g. Mag7  (.json ext will be added)",
                 help="Name the current basket to reuse it later — the .json "
                      "extension is added automatically. Re-saving a name "
@@ -344,20 +379,20 @@ def tab_portfolio() -> None:
             st.markdown("<div style='height:1.72rem'></div>", unsafe_allow_html=True)
             if st.button("💾 Save", use_container_width=True,
                          disabled=not (watchlist_tickers and _name)):
-                _d = st.session_state.get("p_delta", (0.10, 0.70))
+                _d = st.session_state.get(f"{k}_delta", (0.10, 0.70))
                 _was_update = _name.lower() in _names
                 watchlists.save({
                     "name": _name,
                     "tickers": watchlist_tickers,
-                    "option_type": st.session_state.get("p_opt_type", "Calls"),
-                    "min_dte": int(st.session_state.get("p_min_dte", 30)),
-                    "max_dte": int(st.session_state.get("p_max_dte", 90)),
-                    "min_oi": int(st.session_state.get("p_min_oi", 25)),
-                    "min_vol": int(st.session_state.get("p_min_vol", 1)),
+                    "option_type": st.session_state.get(f"{k}_opt_type", "Calls"),
+                    "min_dte": int(st.session_state.get(f"{k}_min_dte", 30)),
+                    "max_dte": int(st.session_state.get(f"{k}_max_dte", 90)),
+                    "min_oi": int(st.session_state.get(f"{k}_min_oi", 25)),
+                    "min_vol": int(st.session_state.get(f"{k}_min_vol", 1)),
                     "delta_min": float(_d[0]),
                     "delta_max": float(_d[1]),
-                    "top_n": int(st.session_state.get("p_top", 5)),
-                    "buy": st.session_state.get("p_action", "").startswith("Buy"),
+                    "top_n": int(st.session_state.get(f"{k}_top", 5)),
+                    "buy": st.session_state.get(f"{k}_action", "").startswith("Buy"),
                 })
                 st.session_state["_wl_flash"] = (
                     f"{'Updated' if _was_update else 'Saved'} watchlist "
@@ -424,23 +459,23 @@ def tab_portfolio() -> None:
     pc1, pc2, pc3, pc4, pc5, pc6 = st.columns([1, 1, 1, 1, 2, 1])
     with pc1:
         port_min_dte = st.number_input("Min DTE", value=30, min_value=1,
-                                       key="p_min_dte")
+                                       key=f"{k}_min_dte")
     with pc2:
         port_max_dte = st.number_input("Max DTE", value=90, min_value=1,
-                                       key="p_max_dte")
+                                       key=f"{k}_max_dte")
     with pc3:
         port_min_oi = st.number_input("Min OI", value=25, min_value=0,
-                                      key="p_min_oi")
+                                      key=f"{k}_min_oi")
     with pc4:
         port_min_vol = st.number_input("Min Vol", value=1, min_value=0,
-                                       key="p_min_vol")
+                                       key=f"{k}_min_vol")
     with pc5:
         port_delta_range = st.slider("Delta Range", 0.0, 1.0,
                                      default_delta_range(False),
-                                     0.05, key="p_delta")
+                                     0.05, key=f"{k}_delta")
     with pc6:
         port_top = st.number_input("Top N per ticker", value=5, min_value=1,
-                                   key="p_top")
+                                   key=f"{k}_top")
 
     # ── Controls row 2: scan semantics ───────────────────────────────────────
     # Watchlist mode is best-option only over a typed basket, so Scan mode
@@ -451,15 +486,15 @@ def tab_portfolio() -> None:
         def _sync_p_delta() -> None:
             """Re-seed the delta band to the new direction's default on a
             Sell/Buy flip (sell ≈ OTM, buy ≈ near-ATM)."""
-            _b = st.session_state.get("p_action", "").startswith("Buy")
-            st.session_state["p_delta"] = default_delta_range(_b)
+            _b = st.session_state.get(f"{k}_action", "").startswith("Buy")
+            st.session_state[f"{k}_delta"] = default_delta_range(_b)
 
         wc1, wc2 = st.columns([2.2, 1.8])
         with wc1:
             direction_label = st.radio(
                 "Direction",
                 ["Sell (IV-rich candidates)", "Buy (IV-cheap candidates)"],
-                horizontal=True, key="p_action", on_change=_sync_p_delta,
+                horizontal=True, key=f"{k}_action", on_change=_sync_p_delta,
                 help="Sell: rank IV-rich premium to write. Buy: rank IV-cheap "
                      "contracts to buy — e.g. puts to short a name, or calls "
                      "across the basket.",
@@ -467,7 +502,7 @@ def tab_portfolio() -> None:
         with wc2:
             opt_type_label = st.radio(
                 "Option type", ["Calls", "Puts", "Both"],
-                horizontal=True, key="p_opt_type",
+                horizontal=True, key=f"{k}_opt_type",
             )
         buy = direction_label.startswith("Buy")
         scan_mode_label = "Best option"
@@ -478,7 +513,7 @@ def tab_portfolio() -> None:
         with sc1:
             opt_type_label = st.radio(
                 "Option type", ["Calls", "Puts", "Both"],
-                horizontal=True, key="p_opt_type",
+                horizontal=True, key=f"{k}_opt_type",
             )
         with sc2:
             scan_mode_label = st.radio(
@@ -500,10 +535,10 @@ def tab_portfolio() -> None:
     scan_mode_key = {"Roll": "roll", "Best option": "best"}[scan_mode_label]
     _side = {"calls": "call", "puts": "put", "both": "both"}[opt_type_key]
 
-    # Invalidate stored results when the source, file, format, watchlist, or
-    # scan semantics change.
+    # Invalidate stored results when the file, format, watchlist, or scan
+    # semantics change. Each tab keeps its own results + cache key.
+    _results_key = "watchlist_results" if is_watchlist else "portfolio_results"
     _cache_key = (
-        input_source,
         f"{uploaded.name}:{len(uploaded.getvalue())}" if uploaded else None,
         tuple(watchlist_tickers),
         brokerage,
@@ -514,9 +549,9 @@ def tab_portfolio() -> None:
         int(port_min_dte),
         int(port_max_dte),
     )
-    if st.session_state.get("_portfolio_cache_key") != _cache_key:
-        st.session_state.pop("portfolio_results", None)
-        st.session_state["_portfolio_cache_key"] = _cache_key
+    if st.session_state.get(f"_{k}_cache_key") != _cache_key:
+        st.session_state.pop(_results_key, None)
+        st.session_state[f"_{k}_cache_key"] = _cache_key
 
     # ── Validation (CSV source only; auto-runs when file + format are set) ────
     scan_ready = False
@@ -545,7 +580,16 @@ def tab_portfolio() -> None:
                       else (uploaded is None or brokerage is None
                             or not scan_ready))
     _scan_label = "Scan Watchlist" if is_watchlist else "Scan Portfolio"
-    if st.button(_scan_label, type="primary", disabled=_scan_disabled):
+    _btn_col, _note_col = st.columns([1, 4], vertical_alignment="center")
+    with _note_col:
+        if st.session_state.get("data_source", "yahoo") == "yahoo":
+            st.caption("Yahoo Finance option quotes can be unavailable while "
+                       "the market is closed — scans may come back empty or "
+                       "throttled until it reopens.")
+    with _btn_col:
+        _scan_clicked = st.button(_scan_label, type="primary",
+                                  disabled=_scan_disabled)
+    if _scan_clicked:
         _provider = st.session_state.get("data_source", "yahoo")
         _scfg = st.session_state.get("schwab_config")
 
@@ -579,35 +623,59 @@ def tab_portfolio() -> None:
             except Exception as exc:
                 st.error(f"Could not parse CSV: {exc}")
                 os.unlink(tmp_path)
-                st.stop()
+                return
             os.unlink(tmp_path)
             source_name = uploaded.name
 
         if not positions:
             st.warning("No positions to scan." if is_watchlist
                        else "No positions found in this CSV.")
-            st.stop()
+            return
 
         st.success(f"Found {len(positions)} position(s): "
                    f"{', '.join(p['ticker'] for p in positions)}")
 
         progress = st.progress(0, text="Scanning…")
         results = []
+        rl_give_up = False  # a wait didn't clear the throttle → stop waiting
         for i, pos in enumerate(positions):
-            progress.progress((i + 1) / len(positions),
-                              text=f"Scanning {pos['ticker']} "
-                                   f"({i+1}/{len(positions)})…")
-            results.append(_scan_one(
-                pos, opt_type_key, scan_mode_key, _provider, _scfg,
-                int(port_min_dte), int(port_max_dte),
-            ))
+            pct = (i + 1) / len(positions)
+            progress.progress(pct, text=f"Scanning {pos['ticker']} "
+                                        f"({i+1}/{len(positions)})…")
+            waited = False  # this ticker already used its one wait
+            while True:
+                try:
+                    res = _scan_one(
+                        pos, opt_type_key, scan_mode_key, _provider, _scfg,
+                        int(port_min_dte), int(port_max_dte),
+                    )
+                    break
+                except RateLimitError as exc:
+                    if rl_give_up or waited:
+                        rl_give_up = True
+                        res = {"position": pos,
+                               "error": (f"{exc}. Yahoo is still throttling "
+                                         "— rescan in a few minutes, or "
+                                         "switch the data source to Schwab."),
+                               "df": pd.DataFrame(), "spot": None,
+                               "earnings_dates": [], "roll_close_costs": {}}
+                        break
+                    waited = True
+                    for left in range(_RL_WAIT_SECONDS, 0, -1):
+                        progress.progress(
+                            pct,
+                            text=(f"Yahoo rate limit — retrying "
+                                  f"{pos['ticker']} in {left}s (the scan "
+                                  f"will finish, just slower)…"))
+                        time.sleep(1)
+            results.append(res)
 
         progress.empty()
         st.session_state["scan_ts"] = datetime.now().astimezone()
         st.session_state["scan_provider"] = st.session_state.get(
             "data_source", "yahoo"
         )
-        st.session_state["portfolio_results"] = {
+        st.session_state[_results_key] = {
             "results": results,
             "uploaded_name": source_name,
             "opt_type": opt_type_key,
@@ -616,7 +684,7 @@ def tab_portfolio() -> None:
         }
 
     # ── Render stored results (survives widget interactions / re-runs) ────────
-    stored = st.session_state.get("portfolio_results")
+    stored = st.session_state.get(_results_key)
     if stored is None:
         return
 
@@ -627,10 +695,22 @@ def tab_portfolio() -> None:
     stored_buy       = stored.get("buy", False)
     stored_side      = {"calls": "call", "puts": "put", "both": "both"}[stored_opt_type]
 
-    # If any ticker failed and the source is Schwab, the saved token has
-    # likely expired — surface the re-auth fix once, above the results.
-    if any(r.get("error") for r in results):
-        render_schwab_reauth_hint(st.session_state.get("scan_provider", "yahoo"))
+    # Every ticker failing is the expired-Schwab-token signature — surface
+    # the re-auth fix once, above the results. A partial failure is more
+    # likely a bad symbol or empty chain, so just name the misses.
+    failed = [r["position"]["ticker"] for r in results if r.get("error")]
+    if failed and len(failed) == len(results):
+        _scfg = st.session_state.get("schwab_config") or {}
+        render_schwab_reauth_hint(
+            st.session_state.get("scan_provider", "yahoo"),
+            key=f"schwab_reauth_{k}",
+            token_file=_scfg.get("token_file"),
+        )
+    elif failed:
+        st.warning(
+            f"Could not fetch {len(failed)} of {len(results)} tickers "
+            f"({', '.join(failed)}) — details in their sections below."
+        )
 
     # ── Cross-ticker leaderboard — richest IV+pp across the whole basket ──────
     if len(results) > 1:
@@ -639,9 +719,18 @@ def tab_portfolio() -> None:
             subtitle="Richest IV+pp contracts across every scanned ticker.",
             eyebrow="TOP CANDIDATES",
         )
+        # Assisted put-selling (stub): a per-row "investigate" control on the
+        # Puts board, gated to watchlist + sell + Schwab. Yahoo can only read
+        # quotes; placing an order needs Schwab. See
+        # options-scanner/assisted-put-selling-implementation-plan.md.
+        _lb_provider = st.session_state.get("scan_provider", "yahoo")
+        _allow_investigate = (
+            is_watchlist and not stored_buy and _lb_provider == "schwab"
+        )
         render_leaderboard(results, stored_side, int(port_min_oi),
                            int(port_top), int(port_min_vol),
-                           delta_range=port_delta_range, buy=stored_buy)
+                           delta_range=port_delta_range, buy=stored_buy,
+                           allow_investigate=_allow_investigate)
 
     for res in results:
         pos    = res["position"]
@@ -763,7 +852,7 @@ def tab_portfolio() -> None:
 
             show_iv_chart(df_filt, spot, stored_side,
                            int(port_min_oi), int(port_top), stored_buy,
-                           ticker=ticker, key_prefix=f"p_{ticker}",
+                           ticker=ticker, key_prefix=f"{k}_{ticker}",
                            min_vol=int(port_min_vol),
                            provider=st.session_state.get("scan_provider", "yahoo"))
 
@@ -792,9 +881,12 @@ def tab_portfolio() -> None:
         int(port_min_vol), opt_type=stored_opt_type,
         delta_range=port_delta_range, buy=stored_buy,
     )
+    _report_kind = "Watchlist" if is_watchlist else "Portfolio"
     st.download_button(
-        "⬇ Download Portfolio Report",
+        f"⬇ Download {_report_kind} Report",
         data=port_html.encode("utf-8"),
-        file_name=f"portfolio_{date.today().strftime('%Y%m%d')}.html",
+        file_name=(f"{_report_kind.lower()}_"
+                   f"{date.today().strftime('%Y%m%d')}.html"),
         mime="text/html",
+        key=f"{k}_dl_report",
     )
