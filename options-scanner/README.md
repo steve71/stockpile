@@ -36,20 +36,28 @@ For repo-wide setup (`uv sync`, etc.) see the
 
 ## Web UI
 
+The recommended way is to launch the scanner **and** the trading
+dashboard together with one command, so the **Live Charts** tab is
+populated. Run from the repo root:
+
 ```bash
-uv run streamlit run options-scanner/run_app.py
+uv run run.py
 ```
 
-A browser tab opens at `http://localhost:8501`. Six tabs cover the
-options-analysis workflow (below); a seventh, **Live Charts**, embeds the
-live trading dashboard. To launch the scanner and the dashboard together
-(so Live Charts is populated), run `uv run run.py` from the repo root. Both
-servers then stream their logs to the one terminal you started them from,
-line-prefixed `[scanner]` and `[dashboard]` so you can tell them apart; the
-dashboard also stays directly reachable at `http://localhost:5000`.
+This starts the scanner on `http://localhost:8501` and the dashboard on
+`http://localhost:5000`, and opens a browser tab on the scanner. Both
+servers stream their logs to the one terminal, line-prefixed `[scanner]`
+and `[dashboard]` so you can tell them apart; the dashboard also stays
+directly reachable at `http://localhost:5000`. `Ctrl+C` stops both. If a
+dashboard is already running on `:5000`, it's reused rather than
+restarted.
 
-To run them separately instead — each in its own terminal, with its own
-logs:
+The scanner has six options-analysis tabs (below); a seventh, **Live
+Charts**, embeds the live trading dashboard.
+
+To run them individually instead — each in its own terminal, with its own
+logs (the scanner's Live Charts tab shows a start hint until the dashboard
+is up):
 
 ```bash
 uv run streamlit run options-scanner/run_app.py   # scanner only  (:8501)
@@ -83,9 +91,14 @@ The options-analysis tabs:
   distribution. The data source (Yahoo Finance / Schwab / Moomoo)
   toggle sits in the title bar so you can flip between sources without
   opening the sidebar.
-- **GEX** — a standalone Gamma Exposure view for one ticker (the same
-  chart also appears below the volatility surface on the Single Ticker
-  tab). See the GEX section below.
+- **Watchlist** — type a basket of tickers (commas, spaces, or new
+  lines) and scan the lot — no broker account needed. Watchlists can
+  be **saved by name** and reloaded later along with the filters they
+  were saved with; a few starter baskets ship with the app under a
+  `Starter:` prefix (e.g. `Starter: Mega Caps`) so they're easy to
+  tell apart from your own saved lists, which stay local. A Sell/Buy
+  direction toggle ranks IV-rich premium to write or IV-cheap
+  contracts to buy.
 - **Portfolio** — drag in a brokerage CSV (Schwab, Robinhood, Fidelity,
   Merrill, or a hand-written
   [stockpile file](../docs/stockpile-format.md)), pick the format, hit
@@ -93,16 +106,12 @@ The options-analysis tabs:
   collapsible section, with a Recommended Action card above the table
   translating the top IV-rich pick into explicit SELL TO OPEN / ROLL
   instructions. The validator runs automatically on upload and shows
-  any problems before you scan.
-
-  Instead of a CSV you can switch the **Input source** to **Watchlist**
-  and type a basket of tickers (commas, spaces, or new lines) — no
-  broker account needed. Watchlists can be **saved by name** and
-  reloaded later along with the filters they were saved with; a few
-  starter baskets (Mega Caps, Semiconductors, High IV, Index ETFs) ship
-  with the app, and your own saved lists stay local. Both input sources
-  also produce a cross-ticker IV+pp leaderboard above the per-ticker
+  any problems before you scan. Both Watchlist and Portfolio scans
+  produce a cross-ticker IV+pp leaderboard above the per-ticker
   results.
+- **GEX** — the Gamma Exposure view: one or more tickers, with
+  render-time Side (Calls/Puts/Both) and Min OI filters on the stored
+  scan. See the GEX section below.
 - **Spreads** — power-user view of 13 multi-leg strategies ranked by
   risk/reward subject to a POP threshold. Click a row to see the
   payoff diagram (at-expiry + current value).
@@ -136,6 +145,57 @@ to localhost.
 
 To stop the server: `Ctrl+C` in the terminal where you started it.
 There is no in-app shutdown button.
+
+### Changing the ports
+
+By default the scanner runs on `8501` and the dashboard on `5000`. If
+either port is already in use, you can move it.
+
+**Dashboard (`5000`)** — set `OSC_DASHBOARD_PORT`. The Flask app, the
+`uv run run.py` launcher, and the scanner's Live Charts embed all read
+the same variable, so they stay in sync:
+
+```bash
+# macOS / Linux
+export OSC_DASHBOARD_PORT=5050
+uv run run.py
+
+# Windows PowerShell
+$env:OSC_DASHBOARD_PORT = "5050"
+uv run run.py
+```
+
+For remote/cloud access where the dashboard sits behind a reverse proxy
+or on a different host, set `OSC_DASHBOARD_URL` to the full embed URL
+instead — it's used verbatim as the iframe source and takes precedence
+over `OSC_DASHBOARD_PORT`:
+
+```bash
+export OSC_DASHBOARD_URL="http://my-server:5050"
+```
+
+**Scanner (`8501`)** — this is Streamlit's own port, so use Streamlit's
+config. Put it in a `.streamlit/config.toml` file (project-level at the
+repo root, or global at `~/.streamlit/config.toml`); it's honored
+whether you launch with `uv run run.py` or `streamlit run` directly:
+
+```toml
+[server]
+port = 8502
+```
+
+Or pass `--server.port` when launching the scanner on its own:
+
+```bash
+uv run streamlit run options-scanner/run_app.py --server.port 8502
+```
+
+Note: the `STREAMLIT_SERVER_PORT` environment variable does **not** work
+in current Streamlit — it applies env vars only to a few "sensitive"
+options, and `server.port` isn't one. Use `config.toml` or
+`--server.port`. The `uv run run.py` launcher doesn't forward a
+`--server.port` flag, so for the combined launcher the `config.toml`
+route is the one to use.
 
 ### Common problems
 
@@ -393,9 +453,9 @@ annualized. This gives the true return on capital at risk.
 
 ## Gamma Exposure (GEX)
 
-The web UI shows a **GEX bar chart** on its own **GEX** tab, and also
-below the volatility surface chart on the Single Ticker tab. It is not
-available in the CLI.
+The web UI shows a **GEX bar chart** on its own **GEX** tab, with
+Side (Calls/Puts/Both) and Min OI filters applied at render time —
+no rescan needed. It is not available in the CLI.
 
 ### What it is
 

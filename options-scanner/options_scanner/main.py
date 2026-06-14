@@ -478,8 +478,15 @@ def main() -> None:
         help="Override the preset's surface-fit algorithm",
     )
     parser.add_argument(
-        "--fit-weights", choices=["none", "oi", "inv_spread"], default=None,
+        "--fit-weights", choices=["none", "oi", "inv_spread", "vega"],
+        default=None,
         help="Regression weighting for the fit (with --algorithm)",
+    )
+    parser.add_argument(
+        "--robust", choices=["none", "huber", "tukey"], default=None,
+        help="Robust surface fit: iteratively downweight (huber) or "
+             "reject (tukey) outliers so they can't drag the surface "
+             "toward themselves. Default: none",
     )
     parser.add_argument(
         "--score", choices=_score_choices, default=None,
@@ -495,18 +502,24 @@ def main() -> None:
         args.html = True
 
     # Resolve the pluggable surface-fit configs from preset + overrides.
+    # Both presets use the default filters (which include
+    # exclude_earnings as of 2026-06); they differ in algorithm + score.
     _presets = {
         "current": (_FILTER_DEFAULT, ("global_poly", frozenset()),
                     ("raw_pp", frozenset())),
-        "v2": (_FILTER_DEFAULT + (("exclude_earnings", frozenset()),),
+        "v2": (_FILTER_DEFAULT,
                ("per_expiration", frozenset({("weights", "inv_spread")})),
                ("zscore", frozenset())),
     }
     args.surface_filters, args.algo_config, args.score_config = _presets[args.preset]
-    if args.algorithm:
-        _w = frozenset({("weights", args.fit_weights)}) if args.fit_weights \
-            else frozenset()
-        args.algo_config = (args.algorithm, _w)
+    if args.algorithm or args.fit_weights or args.robust:
+        _name, _kw = args.algo_config
+        _kw = dict(_kw)
+        if args.fit_weights:
+            _kw["weights"] = args.fit_weights
+        if args.robust:
+            _kw["robust"] = args.robust
+        args.algo_config = (args.algorithm or _name, frozenset(_kw.items()))
     if args.score:
         args.score_config = (args.score, frozenset())
 

@@ -33,7 +33,7 @@ from options_scanner.display.spot_meta import (
     spot_value_html,
 )
 from options_scanner.fetch import fetch_and_enrich
-from options_scanner.ui_theme import metric_card
+from options_scanner.ui_theme import metric_card, render_schwab_reauth_hint
 
 
 def tab_gex() -> None:
@@ -110,6 +110,26 @@ def tab_gex() -> None:
                 unsafe_allow_html=True,
             )
 
+        # Row 2: render-time filters — they re-slice the displayed results
+        # live (no rescan), but live here so they're visible up front.
+        f1, f2, f3 = st.columns([1.6, 1, 3.4], vertical_alignment="bottom")
+        with f1:
+            st.radio(
+                "Side", ["Both", "Calls", "Puts"], horizontal=True,
+                key="g_side",
+                help="Dealer gamma is the combined call+put book; filter one "
+                     "side to see which book a wall belongs to.",
+            )
+        with f2:
+            st.number_input(
+                "Min OI", value=0, min_value=0, key="g_min_oi",
+                help="Drop strikes below this open interest before computing "
+                     "GEX — trims noise bars from barely-traded contracts.",
+            )
+        with f3:
+            st.caption("Side and Min OI apply live to the scanned results — "
+                       "no rescan needed.")
+
     st.caption(
         f"Scans the **{int(min_dte)}–{int(max_dte)} DTE** chain across "
         "both calls and puts. GEX is most reliable on near-term chains "
@@ -136,6 +156,7 @@ def tab_gex() -> None:
 
         per_ticker: dict[str, dict] = {}
         failed: list[tuple[str, str]] = []
+        fetch_errors = False  # fetch failures (vs. local no-options/no-GEX)
         progress = st.progress(
             0.0, text=f"Fetching {len(tickers)} ticker(s)…"
         )
@@ -152,6 +173,7 @@ def tab_gex() -> None:
             )
             if err:
                 failed.append((t, err))
+                fetch_errors = True
                 continue
             if df.empty:
                 failed.append((t, f"no options in {int(min_dte)}–"
@@ -170,6 +192,13 @@ def tab_gex() -> None:
             st.warning(f"**{t}** skipped — {msg}")
         if not per_ticker:
             st.error("No tickers returned GEX data.")
+            if fetch_errors:
+                _scfg = st.session_state.get("schwab_config") or {}
+                render_schwab_reauth_hint(
+                    st.session_state.get("data_source", "yahoo"),
+                    key="schwab_reauth_gex",
+                    token_file=_scfg.get("token_file"),
+                )
             st.session_state.pop("gex_results", None)
             return
 
@@ -192,20 +221,39 @@ def tab_gex() -> None:
     if not per_ticker:
         return
 
+    # ── Render-time filters (widgets live in the controls card above) ─────
+    side_label = st.session_state.get("g_side", "Both")
+    g_min_oi = st.session_state.get("g_min_oi", 0)
+
+    def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+        sub = df[df["open_interest"] >= int(g_min_oi)]
+        if side_label != "Both":
+            sub = sub[sub["type"] == ("call" if side_label == "Calls"
+                                      else "put")]
+        return sub
+
     # Build summary df sorted by |Total GEX| descending so the most
-    # gamma-exposed ticker is the default drill-down pick.
+    # gamma-exposed ticker is the default drill-down pick. Summaries are
+    # recomputed from the filtered chains so the table tracks the filters.
     rows = []
     for t, info in per_ticker.items():
         spot = info["spot"]
+        summary = compute_gex_summary(_apply_filters(info["df"]), spot)
+        if summary is None:
+            continue
         rows.append({
             "Ticker":    t,
             "Spot":      spot,
-            "Total GEX": info["total_gex"],
-            "Regime":    info["regime"],
-            "Gamma flip": fmt_strike_with_dist(info["zero_gamma"], spot),
-            "Top Wall":  fmt_strike_with_dist(info["top_wall"], spot),
-            "Top Amp":   fmt_strike_with_dist(info["top_amp"], spot),
+            "Total GEX": summary["total_gex"],
+            "Regime":    summary["regime"],
+            "Gamma flip": fmt_strike_with_dist(summary["zero_gamma"], spot),
+            "Top Wall":  fmt_strike_with_dist(summary["top_wall"], spot),
+            "Top Amp":   fmt_strike_with_dist(summary["top_amp"], spot),
         })
+    if not rows:
+        st.info("Nothing left after the Side / Min OI filters — loosen them "
+                "to see GEX again.")
+        return
     summary_df = pd.DataFrame(rows)
     summary_df = (summary_df
                   .assign(_abs=summary_df["Total GEX"].abs())
@@ -254,7 +302,7 @@ def tab_gex() -> None:
         drill = res["tickers"][0]
 
     info = per_ticker[drill]
-    df_r = info["df"]
+    df_r = _apply_filters(info["df"])
     spot = info["spot"]
 
     if n == 1:

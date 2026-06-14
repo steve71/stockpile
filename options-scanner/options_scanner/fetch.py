@@ -35,6 +35,7 @@ import streamlit as st
 from options_scanner.iv_algorithms import DEFAULT_CONFIG as ALGO_DEFAULT, AlgorithmConfig
 from options_scanner.iv_filters import DEFAULT_CONFIG, SurfaceFilterConfig
 from options_scanner.iv_scores import DEFAULT_CONFIG as SCORE_DEFAULT, ScoreConfig
+from stocks_shared.yahoo import RateLimitError, is_rate_limit_error
 
 
 def _enrich(df: pd.DataFrame, ticker: str,
@@ -94,9 +95,21 @@ def fetch_and_enrich(ticker: str, opt_type: str, min_dte: int,
                          max_dte=max_dte, provider=provider,
                          schwab_config=schwab_config,
                          moomoo_config=moomoo_config)
+    except RateLimitError as exc:
+        # These tabs have no retry loop — report it as an actionable
+        # error. (Raising would crash the tab; returning keeps the
+        # result uncached only on the raise path, so accept the 5-min
+        # cache here: Yahoo throttles rarely clear faster anyway.)
+        return pd.DataFrame(), [], f"{exc}. Wait a minute or two and rescan."
     except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
+        if is_rate_limit_error(exc):
+            return pd.DataFrame(), [], (f"{exc}. Wait a minute or two and "
+                                        "rescan.")
         return pd.DataFrame(), [], str(exc)
     except Exception as exc:  # noqa: BLE001 — surface Moomoo/Schwab SDK errors
+        if is_rate_limit_error(exc):
+            return pd.DataFrame(), [], (f"{exc}. Wait a minute or two and "
+                                        "rescan.")
         return pd.DataFrame(), [], f"{type(exc).__name__}: {exc}"
     if df.empty:
         return df, [], None
@@ -129,9 +142,15 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
                          max_dte=max_dte, provider=provider,
                          schwab_config=schwab_config,
                          moomoo_config=moomoo_config)
+    except RateLimitError:
+        raise  # propagate uncached so callers can wait and retry
     except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
+        if is_rate_limit_error(exc):
+            raise RateLimitError(str(exc)) from exc
         return pd.DataFrame(), [], str(exc)
     except Exception as exc:  # noqa: BLE001 — surface Moomoo/Schwab SDK errors
+        if is_rate_limit_error(exc):
+            raise RateLimitError(str(exc)) from exc
         return pd.DataFrame(), [], f"{type(exc).__name__}: {exc}"
     if df.empty:
         return df, [], None

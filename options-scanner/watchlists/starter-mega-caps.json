@@ -1,5 +1,5 @@
 {
-  "name": "Mega Caps",
+  "name": "Starter: Mega Caps",
   "tickers": [
     "AAPL",
     "MSFT",
@@ -8,7 +8,9 @@
     "GOOGL",
     "META",
     "AVGO",
-    "TSLA"
+    "TSLA",
+    "TSM",
+    "BRK-B"
   ],
   "option_type": "Calls",
   "min_dte": 30,
@@ -17,5 +19,7 @@
   "min_vol": 1,
   "delta_min": 0.1,
   "delta_max": 0.7,
-  "top_n": 5
+  "top_n": 5,
+  "buy": false,
+  "ts": "2026-06-11T07:37:58"
 }

@@ -36,12 +36,14 @@ AlgorithmConfig = tuple[str, frozenset]
 # The f·m²·√T term lets the smile's CURVATURE vary with maturity (sharp
 # near-dated smiles, flat long-dated) instead of forcing one shared
 # curvature c across all expirations — a single c is a maturity-weighted
-# average that sits below the steeper near-dated wings. Require ≥2
-# residual degrees of freedom — params + 2 = 8 — so the fit is a genuine
-# regression, never an exact interpolant; below 8 we'd rather fall back
-# to the honest flat surface than report a fake-perfect fit.
+# average that sits below the steeper near-dated wings. The term is
+# only included when the fit subset spans ≥3 distinct expirations —
+# below that it's knife-edged (two maturities can't pin curvature-vs-T)
+# and the surface degrades to the 5-term model. Require ≥2 residual
+# degrees of freedom — params + 2 — so the fit is a genuine regression,
+# never an exact interpolant; below that we'd rather fall back to the
+# honest flat surface than report a fake-perfect fit.
 _GLOBAL_PARAMS = 6
-_MIN_GLOBAL_ROWS = _GLOBAL_PARAMS + 2   # = 8
 # per_expiration picks the highest polynomial degree that still leaves
 # ≥2 residual degrees of freedom, so a slice is FIT, never interpolated
 # (a degree-d polynomial passes exactly through d+1 points). Below the
@@ -59,6 +61,10 @@ def _row_weights(rows: pd.DataFrame, weights: str) -> np.ndarray | None:
       "none"       — equal weight (OLS)
       "oi"         — weight by open interest (liquid quotes anchor the fit)
       "inv_spread" — weight by 1 / (ask - bid) (tight quotes are more reliable)
+      "vega"       — weight by vega (IV noise from price discreteness
+                     scales as 1/vega, so high-vega quotes carry the
+                     most reliable IV; naturally downweights far-OTM
+                     wings)
     """
     if weights == "oi" and "open_interest" in rows.columns:
         w = rows["open_interest"].to_numpy(dtype=float)
@@ -68,6 +74,10 @@ def _row_weights(rows: pd.DataFrame, weights: str) -> np.ndarray | None:
         spread = (rows["ask"] - rows["bid"]).to_numpy(dtype=float)
         spread = np.where(np.isfinite(spread), spread, np.inf)
         return 1.0 / np.maximum(spread, 0.01)
+    if weights == "vega" and "vega" in rows.columns:
+        w = rows["vega"].abs().to_numpy(dtype=float)
+        w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
+        return w if w.sum() > 0 else None
     return None
 
 
@@ -81,9 +91,56 @@ def _wls(X: np.ndarray, y: np.ndarray, w: np.ndarray | None) -> np.ndarray:
     return coeffs
 
 
+# IRLS tuning constants — the textbook values giving ~95% efficiency
+# under normal errors. Huber downweights outliers; Tukey rejects them
+# entirely beyond c, which is aggressive on thin chains.
+_HUBER_K = 1.345
+_TUKEY_C = 4.685
+_IRLS_MAX_ITERS = 5
+
+
+def _robust_wls(X: np.ndarray, y: np.ndarray, w: np.ndarray | None,
+                robust: str = "none") -> np.ndarray:
+    """`_wls` hardened against outliers via IRLS.
+
+    Plain least squares lets the very outliers the scanner hunts for
+    bend the surface toward themselves (a stale 80%-IV print shrinks
+    its own measured excess). With robust="huber"/"tukey" the fit is
+    re-solved a few times, each pass downweighting rows by their
+    residual relative to a robust scale (MAD), so the surface settles
+    on the *typical* IV and genuine outliers stand fully above it.
+    Robustness weights multiply the base weights `w`, composing with
+    oi / inv_spread / vega weighting. robust="none" is plain `_wls`.
+    """
+    coeffs = _wls(X, y, w)
+    if robust not in ("huber", "tukey"):
+        return coeffs
+    for _ in range(_IRLS_MAX_ITERS):
+        resid = y - X @ coeffs
+        # MAD scaled to estimate σ under normality.
+        scale = float(np.median(np.abs(resid - np.median(resid)))) * 1.4826
+        if scale < 1e-9:
+            break   # (near-)perfect fit — nothing to downweight
+        u = np.abs(resid) / scale
+        if robust == "huber":
+            rw = np.minimum(1.0, _HUBER_K / np.maximum(u, 1e-12))
+        else:
+            rw = np.where(u < _TUKEY_C, (1.0 - (u / _TUKEY_C) ** 2) ** 2, 0.0)
+        cw = rw if w is None else rw * w
+        if cw.sum() <= 0:
+            break   # everything rejected — keep the previous fit
+        new_coeffs = _wls(X, y, cw)
+        converged = np.allclose(new_coeffs, coeffs, rtol=1e-6, atol=1e-12)
+        coeffs = new_coeffs
+        if converged:
+            break
+    return coeffs
+
+
 # ── Algorithms ──────────────────────────────────────────────────────────────────
 
-def _global_poly(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none"):
+def _global_poly(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none",
+                 robust: str = "none"):
     """One surface across the whole chain:
     IV ≈ a + b·m + c·m² + d·√T + e·m·√T + f·m²·√T.
 
@@ -96,18 +153,29 @@ def _global_poly(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none"):
     labels — or (None, None) when there are too few points to fit.
     """
     fit = df[fit_mask]
-    if len(fit) < _MIN_GLOBAL_ROWS:
+
+    # Curvature gate: with fewer than 3 distinct expirations in the
+    # fit subset, the f·m²·√T term is knife-edged — two maturities
+    # can't pin how curvature varies with T, so the column trades a
+    # plausible smile for a wild frown (seen on NVTS). Drop it and fit
+    # the 5-term surface instead.
+    exp_key = "expiration" if "expiration" in fit.columns else "dte"
+    with_curv_term = fit[exp_key].nunique() >= 3
+    n_params = _GLOBAL_PARAMS if with_curv_term else _GLOBAL_PARAMS - 1
+    if len(fit) < n_params + 2:
         return None, None
 
     def design(frame: pd.DataFrame) -> np.ndarray:
         m = frame["log_moneyness"].to_numpy(dtype=float)
         sqrt_T = np.sqrt(frame["dte"].to_numpy(dtype=float) / 365.0)
-        return np.column_stack(
-            [np.ones_like(m), m, m ** 2, sqrt_T, m * sqrt_T, m ** 2 * sqrt_T])
+        cols = [np.ones_like(m), m, m ** 2, sqrt_T, m * sqrt_T]
+        if with_curv_term:
+            cols.append(m ** 2 * sqrt_T)
+        return np.column_stack(cols)
 
     try:
-        coeffs = _wls(design(fit), fit["iv"].to_numpy(dtype=float),
-                      _row_weights(fit, weights))
+        coeffs = _robust_wls(design(fit), fit["iv"].to_numpy(dtype=float),
+                             _row_weights(fit, weights), robust)
     except np.linalg.LinAlgError:
         return None, None
     iv_fitted = design(df) @ coeffs
@@ -120,7 +188,8 @@ def _poly_design(frame: pd.DataFrame, degree: int) -> np.ndarray:
     return np.column_stack([m ** p for p in range(degree + 1)])
 
 
-def _per_expiration(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none"):
+def _per_expiration(df: pd.DataFrame, fit_mask: np.ndarray,
+                    weights: str = "none", robust: str = "none"):
     """Fit a low-order IV smile independently per expiration slice.
 
     Eliminates term-structure noise: each expiration's excess is
@@ -162,9 +231,9 @@ def _per_expiration(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none
 
         if degree is not None:
             try:
-                coeffs = _wls(_poly_design(fit, degree),
-                              fit["iv"].to_numpy(dtype=float),
-                              _row_weights(fit, weights))
+                coeffs = _robust_wls(_poly_design(fit, degree),
+                                     fit["iv"].to_numpy(dtype=float),
+                                     _row_weights(fit, weights), robust)
                 iv_fitted[positions] = _poly_design(sel, degree) @ coeffs
                 methods[positions] = "per_expiry"
                 fitted_any = True
@@ -175,7 +244,7 @@ def _per_expiration(df: pd.DataFrame, fit_mask: np.ndarray, weights: str = "none
         # Too few (or zero) fit rows for a local curve — borrow the
         # global surface; if that's unavailable, use the slice mean.
         if not global_done:
-            global_arr, _ = _global_poly(df, fit_mask, weights)
+            global_arr, _ = _global_poly(df, fit_mask, weights, robust)
             global_done = True
         if global_arr is not None:
             iv_fitted[positions] = global_arr[positions]
@@ -205,13 +274,13 @@ def _svi(df: pd.DataFrame, fit_mask: np.ndarray, **kwargs) -> np.ndarray | None:
 REGISTRY: dict[str, dict] = {
     "global_poly": {
         "fn":       _global_poly,
-        "defaults": {"weights": "none"},
+        "defaults": {"weights": "none", "robust": "none"},
         "label":    "Global polynomial (current)",
         "enabled":  True,
     },
     "per_expiration": {
         "fn":       _per_expiration,
-        "defaults": {"weights": "none"},
+        "defaults": {"weights": "none", "robust": "none"},
         "label":    "Per-expiration polynomial",
         "enabled":  True,
     },

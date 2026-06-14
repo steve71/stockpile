@@ -1,12 +1,34 @@
 """Schwab developer API helpers — mirrors stocks_shared/yahoo.py."""
 
+import json
 import logging
+import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+# Schwab refresh tokens expire a fixed 7 days after the initial OAuth login.
+SCHWAB_REFRESH_TOKEN_TTL_DAYS = 7.0
+
+
+def token_age_days(token_file: str) -> float | None:
+    """Days since the token's initial OAuth login, or None if unknown.
+
+    schwab-py token files wrap the OAuth token with a `creation_timestamp`
+    set at login. Age ≥ SCHWAB_REFRESH_TOKEN_TTL_DAYS means the refresh
+    token has definitively expired and schwab_auth.py must be re-run.
+    Returns None when the file is missing, unreadable, or has no timestamp.
+    """
+    try:
+        with open(Path(token_file).expanduser()) as f:
+            ts = json.load(f).get("creation_timestamp")
+        return None if ts is None else (time.time() - float(ts)) / 86400.0
+    except (OSError, ValueError, TypeError):
+        return None
 
 # Schwab uses $NAME for cash-settled index options.
 _SCHWAB_INDEX_TICKERS = frozenset({
@@ -15,10 +37,18 @@ _SCHWAB_INDEX_TICKERS = frozenset({
 })
 
 
+# Class shares (BRK.B, BF.A, …) — NYSE tape uses a dot, Yahoo a dash,
+# Schwab a slash. Accept any of the three and rewrite per provider.
+# (Mirrors _CLASS_SHARE_RE in stocks_shared/yahoo.py.)
+_CLASS_SHARE_RE = re.compile(r"^([A-Z]{1,5})[./-]([A-Z])$")
+
+
 def normalize_ticker_schwab(ticker: str) -> str:
     """Prepend $ for index tickers that Schwab lists under $NAME.
 
-    Trailing ! disables normalization — the bare symbol is used as-is.
+    Class-share notation (BRK.B / BRK-B / BRK/B) is rewritten to Schwab's
+    slash form (BRK/B). Trailing ! disables normalization — the bare
+    symbol is used as-is.
     """
     t = ticker.strip().upper()
     if t.endswith("!"):
@@ -26,6 +56,9 @@ def normalize_ticker_schwab(ticker: str) -> str:
     t = t.lstrip("^$")
     if t in _SCHWAB_INDEX_TICKERS:
         return f"${t}"
+    m = _CLASS_SHARE_RE.match(t)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
     return t
 
 # Cache maps (app_key, token_path) -> (client, token_file_mtime). The mtime
@@ -39,6 +72,17 @@ def _token_mtime(token_path: Path) -> float | None:
         return token_path.stat().st_mtime
     except OSError:
         return None
+
+
+def token_mtime(token_file: str) -> float | None:
+    """Public mtime (epoch seconds) of the token file, or None if missing.
+
+    Lets a long-running UI detect re-auth — a freshly minted token
+    rewrites the file — so it can drop cached fetches without a restart.
+    """
+    if not token_file:
+        return None
+    return _token_mtime(Path(token_file).expanduser())
 
 
 def get_client(app_key: str, app_secret: str, callback_url: str,
@@ -98,10 +142,15 @@ def get_client(app_key: str, app_secret: str, callback_url: str,
 
 
 def fetch_live_price_schwab(client, ticker: str) -> float | None:
-    """Return live mark price for ticker, or None on error."""
+    """Return live mark price for ticker, or None on error.
+
+    Uses the plural get_quotes endpoint: get_quote puts the symbol in the
+    URL path, which 404s on class shares like BRK/B; get_quotes passes it
+    as a query parameter and handles the slash fine.
+    """
     try:
         ticker = normalize_ticker_schwab(ticker)
-        resp = client.get_quote(ticker)
+        resp = client.get_quotes([ticker])
         resp.raise_for_status()
         data = resp.json()
         quote = data.get(ticker, {}).get("quote", {})
@@ -221,12 +270,41 @@ _SCHWAB_RESAMPLE = {
 }
 
 
+# Epoch seconds for any realistic date top out around 4.1e9 (year ~2100),
+# while epoch milliseconds are >= ~1e11 for any date from 1973 onward. So
+# 1e11 separates the two units; a higher cut (e.g. 1e12) wrongly reads the
+# ms timestamps of pre-2001 dates — common in long daily histories — as
+# seconds, throwing them tens of thousands of years into the future.
+_MS_EPOCH_THRESHOLD = 10**11
+
+
+def _to_unix_seconds(value) -> int:
+    """Normalize Schwab candle timestamps to UTC epoch seconds."""
+    if isinstance(value, bool):
+        raise ValueError("Invalid candle datetime value")
+
+    if isinstance(value, (int, float)):
+        unit = "ms" if abs(float(value)) >= _MS_EPOCH_THRESHOLD else "s"
+        ts = pd.to_datetime(value, unit=unit, utc=True, errors="coerce")
+    elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        number = int(value)
+        unit = "ms" if abs(number) >= _MS_EPOCH_THRESHOLD else "s"
+        ts = pd.to_datetime(number, unit=unit, utc=True, errors="coerce")
+    else:
+        ts = pd.to_datetime(value, utc=True, errors="coerce")
+
+    if pd.isna(ts):
+        raise ValueError(f"Invalid candle datetime value: {value!r}")
+
+    return int(ts.timestamp())
+
+
 def _parse_schwab_candles(data: dict) -> list[dict]:
     """Convert a Schwab price-history payload into dashboard candle dicts."""
     candles = (data or {}).get("candles") or []
     rows = [
         {
-            "time":   int(c["datetime"]) // 1000,
+            "time":   _to_unix_seconds(c["datetime"]),
             "open":   round(float(c["open"]), 4),
             "high":   round(float(c["high"]), 4),
             "low":    round(float(c["low"]), 4),

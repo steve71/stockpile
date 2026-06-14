@@ -214,3 +214,124 @@ def test_inv_spread_weighting_runs():
     fitted = iv_algorithms.fit(
         df, _all(df), ("global_poly", frozenset({("weights", "inv_spread")})))
     assert fitted is not None and np.isfinite(fitted).all()
+
+
+def test_vega_weighting_pulls_fit_toward_high_vega_point():
+    """Mirror of the OI-weighting test: a rich strike with dominant vega
+    bends the vega-weighted fit toward itself."""
+    spot = 100.0
+    rich_K = 110.0
+    df = _chain(
+        spot, [(30, "A")],
+        [80, 85, 90, 95, 100, 105, 110, 115, 120],
+        lambda K, t: 0.30 + (0.20 if K == rich_K else 0.0),
+        vega=lambda K, t: 50.0 if K == rich_K else 0.5,
+    )
+    base = iv_algorithms.fit(df, _all(df), ("global_poly", frozenset()))
+    wtd = iv_algorithms.fit(
+        df, _all(df), ("global_poly", frozenset({("weights", "vega")})))
+    i = int(df.index[df["strike"] == rich_K][0])
+    assert abs(df["iv"].iloc[i] - wtd[i]) < abs(df["iv"].iloc[i] - base[i])
+
+
+# ── Robust (IRLS) fitting ────────────────────────────────────────────────────
+
+def _outlier_chain():
+    """Flat 0.30 surface, three expirations, one wild stale print."""
+    spot = 100.0
+    out_K, out_exp = 110.0, "B"
+    df = _chain(
+        spot, [(30, "A"), (60, "B"), (90, "C")],
+        [80, 85, 90, 95, 100, 105, 110, 115, 120],
+        lambda K, t: 0.30 + (0.50 if (K == out_K and t == 60) else 0.0))
+    out = ((df["strike"] == out_K) & (df["expiration"] == out_exp)).to_numpy()
+    return df, out
+
+
+def test_huber_outlier_keeps_more_of_its_own_excess():
+    """Under OLS the outlier drags the surface toward itself; under
+    Huber the surface stays near the clean 0.30 baseline, so the
+    outlier's residual (its measured excess) is larger and every clean
+    row's residual smaller."""
+    df, out = _outlier_chain()
+    ols = iv_algorithms.fit(df, _all(df), ("global_poly", frozenset()))
+    hub = iv_algorithms.fit(
+        df, _all(df), ("global_poly", frozenset({("robust", "huber")})))
+    iv = df["iv"].to_numpy()
+    assert (iv[out] - hub[out]) > (iv[out] - ols[out])
+    assert np.abs(iv[~out] - hub[~out]).max() \
+        < np.abs(iv[~out] - ols[~out]).max()
+    # Huber surface sits essentially on the clean baseline.
+    assert np.abs(hub[~out] - 0.30).max() < 0.01
+
+
+def test_tukey_rejects_outlier_entirely():
+    df, out = _outlier_chain()
+    tuk = iv_algorithms.fit(
+        df, _all(df), ("per_expiration", frozenset({("robust", "tukey")})))
+    iv = df["iv"].to_numpy()
+    # Clean rows fit ~exactly; the outlier keeps ~all its 0.50 excess.
+    assert np.abs(iv[~out] - tuk[~out]).max() < 1e-6
+    assert (iv[out] - tuk[out]) > 0.45
+
+
+def test_robust_none_matches_plain_fit():
+    df, _ = _outlier_chain()
+    plain = iv_algorithms.fit(df, _all(df), ("global_poly", frozenset()))
+    explicit = iv_algorithms.fit(
+        df, _all(df), ("global_poly", frozenset({("robust", "none")})))
+    assert np.allclose(plain, explicit)
+
+
+def test_robust_on_clean_surface_is_noop():
+    """No outliers → IRLS converges to (numerically) the OLS fit."""
+    spot = 100.0
+    rng = np.random.default_rng(3)
+    df = _chain(spot, [(30, "A"), (60, "B"), (90, "C")],
+                [80, 85, 90, 95, 100, 105, 110, 115, 120],
+                lambda K, t: 0.25 + 0.30 * math.log(K / spot) ** 2)
+    df["iv"] = df["iv"] + rng.normal(0, 0.005, len(df))
+    ols = iv_algorithms.fit(df, _all(df), ("global_poly", frozenset()))
+    hub = iv_algorithms.fit(
+        df, _all(df), ("global_poly", frozenset({("robust", "huber")})))
+    assert np.abs(ols - hub).max() < 0.01
+
+
+# ── Curvature gate (m²·√T needs ≥3 expirations) ─────────────────────────────
+
+def test_curvature_term_gated_below_three_expirations():
+    """With two expirations the m²·√T column is dropped: curvature is
+    shared, so two slices with different smiles can no longer be fit
+    exactly (the old 6-term model could — that exactness was the NVTS
+    knife-edge). With three expirations whose curvature is affine in
+    √T, the full model fits exactly again."""
+    spot = 100.0
+    curv = {30: 0.80, 60: 0.15, 90: 0.45}
+    def iv_fn(K, t):
+        return 0.30 + curv[t] * math.log(K / spot) ** 2
+    strikes = [80, 85, 90, 95, 100, 105, 110, 115, 120]
+    two = _chain(spot, [(30, "A"), (60, "B")], strikes, iv_fn)
+    fitted2 = iv_algorithms.fit(two, _all(two), ("global_poly", frozenset()))
+    assert np.abs(two["iv"].to_numpy() - fitted2).max() > 1e-4
+
+    # Curvature affine in √T across three slices → 6-term model exact.
+    s = {t: math.sqrt(t / 365.0) for t in (30, 60, 90)}
+    slope = (0.80 - 0.20) / (s[30] - s[90])
+    curv_aff = {t: 0.20 + slope * (s[t] - s[90]) for t in (30, 60, 90)}
+    def iv_aff(K, t):
+        return 0.30 + curv_aff[t] * math.log(K / spot) ** 2
+    three = _chain(spot, [(30, "A"), (60, "B"), (90, "C")], strikes, iv_aff)
+    fitted3 = iv_algorithms.fit(three, _all(three),
+                                ("global_poly", frozenset()))
+    assert np.abs(three["iv"].to_numpy() - fitted3).max() < 1e-8
+
+
+def test_single_expiration_fits_with_seven_rows():
+    """The gated 5-param model needs 7 rows (≥2 residual DOF), down
+    from the 6-param model's 8."""
+    spot = 100.0
+    seven = _chain(spot, [(30, "A")],
+                   [70, 80, 90, 100, 110, 120, 130], lambda K, t: 0.30)
+    fitted = iv_algorithms.fit(seven, _all(seven),
+                               ("global_poly", frozenset()))
+    assert fitted is not None and np.allclose(fitted, 0.30)

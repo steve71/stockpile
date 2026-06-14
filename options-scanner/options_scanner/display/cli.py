@@ -72,11 +72,10 @@ def print_results(
 
         rows = []
         for _, r in sub.iterrows():
-            earn_tag = f" {int(r['earnings_count'])}E" if r["earnings_count"] > 0 else ""
             last_v = r.get("last", 0) or 0
             row = {
                 "Strike": fmt_strike(r['strike']),
-                "Expiration": _fmt_exp(r["expiration"]) + earn_tag,
+                "Expiration": _fmt_exp(r["expiration"]),
                 "DTE": int(r["dte"]),
                 "Bid": f"${r['bid']:.2f}",
                 "Ask": f"${r['ask']:.2f}",

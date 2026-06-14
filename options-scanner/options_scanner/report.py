@@ -152,14 +152,12 @@ def _build_table(sub, table_id: str, buy: bool,
 
     rows_html = []
     for _, r in sub.iterrows():
-        earn_tag = (f' <span class="tag-earn">{int(r["earnings_count"])}E</span>'
-                    if r["earnings_count"] > 0 else "")
         iv_ex = r["iv_excess"] * 100
         net_cr = r["mid"] - roll_close_cost if has_net else None
 
         cells = [
             f'<td data-val="{r["strike"]:.2f}">{fmt_strike(r["strike"])}</td>',
-            f'<td data-val="{r["expiration"]}">{_fmt_exp(r["expiration"])}{earn_tag}</td>',
+            f'<td data-val="{r["expiration"]}">{_fmt_exp(r["expiration"])}</td>',
             f'<td data-val="{r["dte"]}">{int(r["dte"])}</td>',
             f'<td data-val="{r["bid"]:.4f}">${r["bid"]:.2f}</td>',
             f'<td data-val="{r["ask"]:.4f}">${r["ask"]:.2f}</td>',
@@ -558,15 +556,13 @@ def _leaderboard_html(results: list[dict], side: str, min_oi: int,
 
     rows = []
     for _, r in board.iterrows():
-        earn_tag = (f' <span class="tag-earn">{int(r["earnings_count"])}E</span>'
-                    if r.get("earnings_count", 0) > 0 else "")
         iv_ex = r["iv_excess"] * 100
         tr_attr = ' style="background-color:rgba(53,194,193,0.16)"' \
             if r.get("_is_ticker_top") else ""
         rows.append(
             f'<tr{tr_attr}><td><a href="#{r["ticker"]}">{r["ticker"]}</a></td>'
             f'<td data-val="{r["strike"]:.2f}">{fmt_strike(r["strike"])}</td>'
-            f'<td data-val="{r["expiration"]}">{_fmt_exp(r["expiration"])}{earn_tag}</td>'
+            f'<td data-val="{r["expiration"]}">{_fmt_exp(r["expiration"])}</td>'
             f'<td data-val="{r["dte"]}">{int(r["dte"])}</td>'
             f'<td data-val="{r["bid"]:.4f}">${r["bid"]:.2f}</td>'
             f'<td data-val="{r["ask"]:.4f}">${r["ask"]:.2f}</td>'

@@ -6,9 +6,10 @@ This orchestrates a three-stage, pluggable pipeline:
 2. Algorithm (iv_algorithms) — produces iv_fitted for every row.
 3. Score    (iv_scores)     — produces signal_score, the ranking key.
 
-The defaults (global-polynomial fit + raw IV+pp score + OTM/spread/
-delta filters) reproduce the original behavior exactly, so nothing
-changes until the caller selects another algorithm or score.
+The defaults are the global-polynomial fit + raw IV+pp score with the
+OTM/spread/delta/exclude-earnings filters; a baseline sanity filter
+(IV noise floor, DTE > 0) is always prepended via
+iv_filters.with_sanity so it shows up in the diagnostics funnel.
 
 Surface model (default algorithm):
 IV ≈ a + b·m + c·m² + d·√T + e·m·√T + f·m²·√T
@@ -24,7 +25,7 @@ import pandas as pd
 
 from options_scanner import iv_algorithms, iv_scores
 from options_scanner.iv_filters import (
-    DEFAULT_CONFIG, SurfaceFilterConfig, apply as _apply_filters,
+    DEFAULT_CONFIG, SurfaceFilterConfig, apply as _apply_filters, with_sanity,
 )
 
 
@@ -54,9 +55,8 @@ def compute_iv_excess(
 
     df = df.copy().reset_index(drop=True)
 
-    # Stage 1 — which rows anchor the fit.
-    valid = df[(df["iv"] > 0.02) & (df["dte"] > 0)]
-    fit_subset = _apply_filters(valid, surface_filters)
+    # Stage 1 — which rows anchor the fit (sanity stage always first).
+    fit_subset = _apply_filters(df, with_sanity(surface_filters))
     fit_mask = df.index.isin(fit_subset.index)
     # Expose fit membership so the chart/diagnostics can show which
     # contracts actually anchored the regression.
