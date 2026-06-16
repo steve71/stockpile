@@ -724,8 +724,14 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
         # quotes; placing an order needs Schwab. See
         # options-scanner/assisted-put-selling-implementation-plan.md.
         _lb_provider = st.session_state.get("scan_provider", "yahoo")
+        # Show the investigate control only when the *displayed* results came
+        # from a Schwab scan AND Schwab is still the currently-selected source.
+        # scan_provider is a per-scan snapshot, so toggling the data source away
+        # hides the control and toggling back to Schwab restores it (no rescan).
         _allow_investigate = (
-            is_watchlist and not stored_buy and _lb_provider == "schwab"
+            is_watchlist and not stored_buy
+            and _lb_provider == "schwab"
+            and st.session_state.get("data_source") == "schwab"
         )
         render_leaderboard(results, stored_side, int(port_min_oi),
                            int(port_top), int(port_min_vol),

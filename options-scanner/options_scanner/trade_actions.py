@@ -124,18 +124,44 @@ def model_limit(*, spot, strike, dte, iv) -> float | None:
 
 # ── Account capacity (read-only) ─────────────────────────────────────────────
 
+def _mask_account(num: str | None) -> str | None:
+    """Last-4 mask of an account number — safe to show on a screen-share."""
+    if not num:
+        return None
+    s = str(num)
+    return "..." + s[-4:] if len(s) > 4 else s
+
+
 @dataclass
 class AccountCapacity:
-    """How much the account can put up to secure cash-secured puts."""
+    """Read-only Schwab balances for sizing cash-secured puts.
 
-    cash_available: float | None = None
-    buying_power: float | None = None
+    `amount` is the cash that can *collateralize* a CSP — deliberately NOT
+    margin buying power. Cash accounts expose ``cashAvailableForTrading``;
+    margin accounts don't (it's a cash-account field), so for a cash-secured
+    put the right figure there is ``availableFundsNonMarginableTrade`` (funds
+    that aren't borrowed), never ``buyingPower`` (margin BP would over-size).
+    `balances` keeps the full numeric ``currentBalances`` for the dialog's
+    account-info panel.
+    """
+
+    cash_available: float | None = None   # cashAvailableForTrading (cash acct)
+    non_marginable: float | None = None   # availableFundsNonMarginableTrade
+    available_funds: float | None = None  # availableFunds
+    buying_power: float | None = None     # buyingPower (margin BP — info only)
+    account_type: str | None = None       # CASH / MARGIN
+    account_mask: str | None = None       # account number, last-4 masked
+    balances: dict = field(default_factory=dict)  # full numeric currentBalances
 
     @property
     def amount(self) -> float | None:
-        """Cash to secure puts, falling back to buying power."""
-        return self.cash_available if self.cash_available is not None \
-            else self.buying_power
+        """Cash that can secure a CSP: cash-account field, else a margin
+        account's non-marginable funds, else plain available funds. Excludes
+        margin buying power on purpose."""
+        for v in (self.cash_available, self.non_marginable, self.available_funds):
+            if v is not None:
+                return v
+        return None
 
 
 def fetch_account_capacity(client) -> AccountCapacity | None:
@@ -146,14 +172,26 @@ def fetch_account_capacity(client) -> AccountCapacity | None:
     """
     try:
         nums = client.get_account_numbers().json()
-        account_hash = nums[0]["hashValue"]
-        acct = client.get_account(account_hash).json()
-        bal = acct.get("securitiesAccount", {}).get("currentBalances", {})
-        cash = bal.get("cashAvailableForTrading")
-        bp = bal.get("buyingPower", bal.get("optionBuyingPower"))
+        entry = nums[0]
+        account_hash = entry["hashValue"]
+        acct = (client.get_account(account_hash).json()
+                .get("securitiesAccount", {}))
+        bal = acct.get("currentBalances", {})
+
+        def _f(key):
+            v = bal.get(key)
+            return float(v) if isinstance(v, (int, float)) else None
+
         return AccountCapacity(
-            cash_available=float(cash) if cash is not None else None,
-            buying_power=float(bp) if bp is not None else None,
+            cash_available=_f("cashAvailableForTrading"),
+            non_marginable=_f("availableFundsNonMarginableTrade"),
+            available_funds=_f("availableFunds"),
+            buying_power=(_f("buyingPower") if bal.get("buyingPower") is not None
+                          else _f("optionBuyingPower")),
+            account_type=acct.get("type"),
+            account_mask=_mask_account(entry.get("accountNumber")),
+            balances={k: float(v) for k, v in bal.items()
+                      if isinstance(v, (int, float))},
         )
     except Exception:
         return None

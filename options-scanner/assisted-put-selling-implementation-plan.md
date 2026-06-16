@@ -112,6 +112,63 @@ IV+pp ranking, which already answers "is this a good trade?".
 - **Schwab trading scope** (still TODO) — confirm OAuth scope / account
   trading-enabled / order-entry endpoint before wiring `place_order`.
 
+## Phase 2.5 — Placement wiring sketch (2026-06-15: access now LIVE)
+
+**Access confirmed.** The Schwab app now has **"Accounts and Trading
+Production"** in *Ready For Use* status, with a MARGIN, options-enabled
+account linked. `get_account_numbers` / `get_account` return real data;
+before activation they returned HTTP 401 "Client not authorized" while
+market-data quotes still worked. `options-scanner/show_accounts.py`
+(read-only) dumps every linked account's balances and is the quick
+"is trading live yet?" check.
+
+**Capacity now correct (Phase 2 item updated).** `fetch_account_capacity`
+derives `amount` from the cash-secured figure — `cashAvailableForTrading`
+(cash acct) → `availableFundsNonMarginableTrade` (margin acct) →
+`availableFunds`, **never** `buyingPower`. On a margin account that's the
+non-marginable cash, not the (larger) margin buying power. The full
+`currentBalances` is surfaced read-only in the dialog's collapsed
+**Account info** panel.
+
+The wiring below is the ONLY remaining gap. It stays **disabled** until the
+user explicitly says "enable trades". Real money — there is no Schwab paper/
+sandbox; `place_order` hits the live account.
+
+1. **Resolve the account (don't blind-index `nums[0]`).** Add `account_id`
+   (the account's last-4) to `[schwab]` config; match it against
+   `get_account_numbers()` to pick the hash. Refuse on zero/multiple matches.
+   Today there's one linked account so `nums[0]` happens to be the right one,
+   but placement must be explicit about *which* account it trades.
+2. **Build the order.** `PutSellOrder` → OSI symbol via
+   `schwab.orders.options.OptionSymbol(underlying, "YYYY-MM-DD", "P",
+   strike).build()` → `option_sell_to_open_limit(symbol, qty, price)`.
+   Re-assert guardrail #1 at build time: single-leg, SELL_TO_OPEN, PUT,
+   qty ≥ 1, and `collateral ≤ capacity.amount` (keeps it cash-secured even
+   though a margin account would *let* you sell more on margin).
+3. **Confirm gate.** After Place Trade, a second explicit confirm (the order
+   JSON + credit + collateral + a paper/live badge from config `paper`).
+   Nothing submits on the first click.
+4. **Submit.** `client.place_order(account_hash, spec)`; a 201 carries the
+   order id in the `Location` header — read it with
+   `schwab.utils.Utils(client, account_hash).extract_order_id(resp)`. On a
+   non-201, surface Schwab's `{"errors":[...]}` payload (same shape as the
+   401 we hit).
+5. **Record + track.** `trades_store.add(...)` with `order_id`, status
+   `WORKING`, `paper` flag; the Trades tab polls `client.get_order(order_id,
+   account_hash)` and maps WORKING/FILLED/REJECTED/CANCELED.
+6. **Closing orders** mirror this: `option_buy_to_close_limit` →
+   `build_put_close_order` → same confirm + submit + store status flip.
+
+**Safety knobs.** `paper=True` (default) should mean "build + validate but
+never call `place_order`" until a real Schwab paper path is confirmed (none
+exists today). Disable the button post-click and dedupe against an existing
+open order in the store for idempotency.
+
+**Touch points to add when enabling:** `trade_actions` (account resolver +
+`place_put_sell_order` wrapper), the dialog confirm gate + submit, `config`
+(`account_id`), `trades_store` status polling. Keep all of it behind the
+"don't enable yet" flag.
+
 ## Phase 3 — Trade tracker tab (P/L + closing)
 
 **DONE (scaffold).** New top-level "Trades" tab (`tabs/trades.py`, wired
