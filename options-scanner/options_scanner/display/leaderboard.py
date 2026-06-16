@@ -41,14 +41,33 @@ def _account_capacity(app_key: str, app_secret: str, callback_url: str,
     if cap is None:
         return None
     return {"cash": cap.cash_available, "bp": cap.buying_power,
-            "amount": cap.amount}
+            "amount": cap.amount, "type": cap.account_type,
+            "mask": cap.account_mask, "balances": cap.balances}
 
 
-@st.dialog("🔍 Investigate put-sell", width="large")
 def _investigate_put_dialog(c: dict, ticker_df: "pd.DataFrame | None" = None,
                             min_oi: int = 25, top_n: int = 5,
                             min_vol: int = 0, provider: str = "schwab") -> None:
-    """Assisted put-selling dialog (Schwab, watchlist leaderboard).
+    """Open the assisted put-selling dialog with the contract identity baked
+    into the title bar — right of "Investigate put-sell". The decorator is
+    applied at call time (not at import) so the title can be dynamic."""
+    _spot_txt = f"${c['spot']:.2f}" if c.get("spot") is not None else "—"
+    _ne = c.get("next_earnings")
+    _earn_seg = f", Earnings {_ne.strftime('%b %d')}" if _ne else ""
+    _title = f"🔍 Sell Put — {c['ticker']} {_spot_txt}{_earn_seg}"
+
+    @st.dialog(_title, width="large")
+    def _dlg() -> None:
+        _investigate_put_body(c, ticker_df=ticker_df, min_oi=min_oi,
+                              top_n=top_n, min_vol=min_vol, provider=provider)
+
+    _dlg()
+
+
+def _investigate_put_body(c: dict, ticker_df: "pd.DataFrame | None" = None,
+                          min_oi: int = 25, top_n: int = 5,
+                          min_vol: int = 0, provider: str = "schwab") -> None:
+    """Assisted put-selling dialog body (Schwab, watchlist leaderboard).
 
     Shows the contract snapshot and a 2-D IV chart (where this put sits vs
     the chain), judges whether it looks executable (fill-quality heuristic in
@@ -61,27 +80,179 @@ def _investigate_put_dialog(c: dict, ticker_df: "pd.DataFrame | None" = None,
     from options_scanner import trade_actions
 
     exp = datetime.strptime(c["expiration"], "%Y-%m-%d").strftime("%b %d '%y")
-    st.markdown(
-        f"### {c['ticker']} &nbsp; ${c['strike']:g} PUT"
-        f" &nbsp;·&nbsp; {exp} ({c['dte']} DTE)"
-    )
 
     def _money(v):
-        return f"${v:.2f}" if v is not None else "—"
+        return f"${v:,.2f}" if v is not None else "—"
 
     iv_txt = f"{c['iv'] * 100:.1f}%" if c.get("iv") is not None else "—"
-    snap = pd.DataFrame({
-        "Field": ["Bid", "Ask", "Mid", "Last", "IV", "Volume", "Open Interest"],
-        "Value": [
-            _money(c.get("bid")), _money(c.get("ask")), _money(c.get("mid")),
-            _money(c.get("last")), iv_txt,
-            f"{c['volume']:,d}", f"{c['open_interest']:,d}",
-        ],
-    })
-    st.dataframe(snap, hide_index=True, width="stretch")
+    delta_txt = f"{c['delta']:.2f}" if c.get("delta") is not None else "—"
+    ann_txt = f"{c['ann_pct']:.1f}%" if c.get("ann_pct") is not None else "—"
+    # Left snapshot table: contract terms. Right table: prices + liquidity.
+    terms = [
+        ("Type", "Put"), ("Strike", f"${c['strike']:g}"), ("Expir", exp),
+        ("DTE", f"{c['dte']}"), ("IV", iv_txt), ("Delta", delta_txt),
+        ("Ann%", ann_txt),
+    ]
+    prices = [
+        ("Bid", _money(c.get("bid"))), ("Ask", _money(c.get("ask"))),
+        ("Mid", _money(c.get("mid"))), ("Last", _money(c.get("last"))),
+        ("OI", f"{c['open_interest']:,d}"), ("Vol", f"{c['volume']:,d}"),
+    ]
 
-    # 2-D IV chart — how rich this put is vs the rest of the chain.
+    def _kv_html(rows):
+        cells = "".join(
+            "<tr>"
+            f"<td style='padding:5px 14px;color:#808495'>{f}</td>"
+            f"<td style='padding:5px 14px;font-variant-numeric:tabular-nums'>{v}</td>"
+            "</tr>"
+            for f, v in rows
+        )
+        return ("<table style='border-collapse:collapse;font-size:1.05rem'>"
+                f"{cells}</table>")
+
+    assessment = trade_actions.assess_fill(
+        bid=c.get("bid"), ask=c.get("ask"), mid=c.get("mid"),
+        volume=c.get("volume"), open_interest=c.get("open_interest", 0),
+    )
+
+    # Account capacity (read-only) — informs sizing in the trade column.
+    scfg = st.session_state.get("schwab_config") or {}
+    cap = (_account_capacity(scfg.get("app_key", ""), scfg.get("app_secret", ""),
+                             scfg.get("callback_url", ""),
+                             scfg.get("token_file", ""))
+           if scfg.get("app_key") else None)
+    cap_amt = cap.get("amount") if cap else None
+    affordable = trade_actions.puts_affordable(cap_amt, c["strike"])
+
+    # Snapshot (left) beside the trade controls (right), so the bid/ask stays
+    # visible while you set the limit. The IV-surface chart goes full-width at
+    # the bottom. The contract identity now lives in the dialog title bar, so
+    # the left panel just gets a short label that lines up with the right one.
+    _ratio = [1, 1.5]
+    title_l, title_r = st.columns(_ratio)
+    with title_l:
+        st.markdown("### Contract")
+    with title_r:
+        st.markdown("### Sell a cash-secured put")
+
+    # Top row, top-aligned, so "Suggested limit" (top of the right panel) lines
+    # up with the top of the tables. The disclaimers + Place Trade button go in
+    # a separate footer row below, where they line up with each other.
+    snap_col, trade_col = st.columns(_ratio, vertical_alignment="top")
+    with snap_col:
+        # Two side-by-side HTML tables (terms | prices). Plain HTML rather than
+        # st.dataframe, which always draws a header row — here an empty gray bar,
+        # since these key/value columns carry no titles.
+        terms_col, prices_col = st.columns(2)
+        with terms_col:
+            st.markdown(_kv_html(terms), unsafe_allow_html=True)
+        with prices_col:
+            st.markdown(_kv_html(prices), unsafe_allow_html=True)
+        for note in assessment.notes:
+            st.caption(f"⚠ {note}")
+
+    with trade_col:
+        # Default limit: mid when liquid; IV-aligned model price when not (the
+        # user can still set their own and place it).
+        if assessment.liquid:
+            default_limit = assessment.suggested_limit
+            st.markdown("**Suggested limit** — mid, rounded to the tick.")
+        else:
+            st.warning("**Thin/wide market:** " + "; ".join(assessment.reasons)
+                       + ". Set your own limit if you still want to place it.")
+            model = trade_actions.model_limit(
+                spot=c.get("spot"), strike=c["strike"], dte=c["dte"],
+                iv=c.get("iv"),
+            )
+            default_limit = (model or assessment.suggested_limit
+                             or c.get("mid") or 0.05)
+            if model is not None:
+                st.markdown(f"**IV+pp-aligned limit: ${model:.2f}** — priced "
+                            "from the contract's own IV.")
+
+        # Stronger resting border on the two inputs so they clearly read as
+        # editable fields. Scoped to the dialog so other number inputs in the
+        # app keep their default styling.
+        st.markdown(
+            "<style>"
+            "div[role='dialog'] div[data-testid='stNumberInput'] "
+            "div[data-baseweb='input']{border:2px solid #8a8f9c !important;"
+            "border-radius:0.5rem;}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+        lim_col, qty_col = st.columns(2)
+        with lim_col:
+            limit = st.number_input(
+                "Limit price",
+                min_value=0.01, value=float(default_limit),
+                step=float(trade_actions.tick_for(default_limit)), format="%.2f",
+                key=f"investigate_limit_{c['ticker']}_{c['strike']:g}_{c['expiration']}",
+            )
+        with qty_col:
+            qty = st.number_input(
+                "Contracts", min_value=1, value=1, step=1,
+                max_value=(affordable if affordable and affordable >= 1 else None),
+                key=f"investigate_qty_{c['ticker']}_{c['strike']:g}_{c['expiration']}",
+            )
+        if cap_amt is not None:
+            _aff = f" · up to {affordable}" if affordable is not None else ""
+            st.caption(f"Cash for puts ${cap_amt:,.0f}{_aff} "
+                       f"(${c['strike'] * 100:,.0f} collateral each). "
+                       "See Account info below for full balances.")
+        else:
+            st.caption("Cash for puts unavailable — connect Schwab "
+                       "(Accounts & Trading access required).")
+
+        # Order preview — validation only; nothing is placed.
+        try:
+            order = trade_actions.build_put_sell_order(
+                ticker=c["ticker"], strike=c["strike"],
+                expiration=c["expiration"], limit=float(limit),
+                quantity=int(qty), capacity=cap_amt,
+            )
+            st.success(f"{order.describe()} — credit ${order.credit:,.0f}, "
+                       f"collateral ${order.collateral:,.0f}.")
+        except ValueError as exc:
+            st.error(f"Can't build this order: {exc}")
+
+    # Footer row: disclaimers (left) beside the Place Trade button (right), so
+    # the button lines up with the two sentences whatever the panels' heights.
+    foot_l, foot_r = st.columns(_ratio, vertical_alignment="center")
+    with foot_l:
+        st.caption("Preview only — placement disabled. Verify at your broker.")
+        st.caption("Sells puts only · never fires without your click · "
+                   "**Schwab only.**")
+    with foot_r:
+        st.button("Place Trade", disabled=True,
+                  help="Order placement isn't wired up yet.")
+
+    # Account info — collapsed; the full Schwab balance snapshot for the linked
+    # account, sitting just above the volatility-surface chart.
+    if cap and cap.get("balances"):
+        _hdr = " · ".join(x for x in (cap.get("mask"), cap.get("type")) if x)
+        with st.expander(f"Account info{(' — ' + _hdr) if _hdr else ''}",
+                         expanded=False):
+            _bals = cap["balances"]
+
+            def _fmt_bal(k, v):
+                return f"{v:,.2f}%" if "percent" in k.lower() else _money(v)
+
+            # Split the balances across two side-by-side tables (sorted, halved).
+            _items = [(k, _fmt_bal(k, _bals[k])) for k in sorted(_bals)]
+            _half = (len(_items) + 1) // 2
+            _ac1, _ac2 = st.columns(2)
+            with _ac1:
+                st.markdown(_kv_html(_items[:_half]), unsafe_allow_html=True)
+            with _ac2:
+                st.markdown(_kv_html(_items[_half:]), unsafe_allow_html=True)
+            st.caption("Read-only. 'amount' used for put sizing is the "
+                       "cash-secured figure, not margin buying power.")
+
+    # IV-surface chart — full width at the bottom (how rich this put is vs the
+    # rest of the chain).
     if ticker_df is not None and not ticker_df.empty and c.get("spot"):
+        st.markdown("---")
         try:
             from options_scanner.display.iv_chart import show_iv_chart
             show_iv_chart(
@@ -92,103 +263,6 @@ def _investigate_put_dialog(c: dict, ticker_df: "pd.DataFrame | None" = None,
             )
         except Exception:
             st.caption("IV chart unavailable for this contract.")
-
-    assessment = trade_actions.assess_fill(
-        bid=c.get("bid"), ask=c.get("ask"), mid=c.get("mid"),
-        volume=c.get("volume"), open_interest=c.get("open_interest", 0),
-    )
-    for note in assessment.notes:
-        st.caption(f"⚠ {note}")
-
-    st.caption(
-        "Guardrails: sells puts only · never fires without your click · "
-        "Schwab only (read-only quotes can't place orders)."
-    )
-    st.markdown("---")
-
-    # Decision zone — a default limit + editable override. Liquid → anchor on
-    # the mid. Illiquid → warn, but still offer an IV-aligned model price so
-    # the user can place their own limit anyway.
-    if assessment.liquid:
-        default_limit = assessment.suggested_limit
-        st.markdown("**Suggested limit price** — the mid, rounded to the "
-                    "tick. Edit to override.")
-    else:
-        st.warning(
-            "**Not liquid enough for a confident fill:** "
-            + "; ".join(assessment.reasons)
-            + ". You can still set your own limit and place the trade."
-        )
-        model = trade_actions.model_limit(
-            spot=c.get("spot"), strike=c["strike"], dte=c["dte"],
-            iv=c.get("iv"),
-        )
-        default_limit = model or assessment.suggested_limit or c.get("mid") or 0.05
-        if model is not None:
-            st.markdown(
-                f"**IV+pp-aligned limit: ${model:.2f}** — priced from the "
-                "contract's own IV (the surface edge), so it reflects the "
-                "rich premium even though a fill here is unlikely in a "
-                "wide/thin market. Edit to override."
-            )
-        else:
-            st.markdown("**Set your limit price** — couldn't model an "
-                        "IV-aligned price for this contract, so start from "
-                        "the market and adjust.")
-
-    limit = st.number_input(
-        "Limit price (credit per share)",
-        min_value=0.01, value=float(default_limit),
-        step=float(trade_actions.tick_for(default_limit)), format="%.2f",
-        key=f"investigate_limit_{c['ticker']}_{c['strike']:g}_{c['expiration']}",
-    )
-
-    # Sizing — contracts to sell, capped by the account's put-selling capacity.
-    scfg = st.session_state.get("schwab_config") or {}
-    cap = (_account_capacity(scfg.get("app_key", ""), scfg.get("app_secret", ""),
-                             scfg.get("callback_url", ""),
-                             scfg.get("token_file", ""))
-           if scfg.get("app_key") else None)
-    cap_amt = cap.get("amount") if cap else None
-    affordable = trade_actions.puts_affordable(cap_amt, c["strike"])
-
-    qc1, qc2 = st.columns([1, 1])
-    with qc1:
-        qty = st.number_input(
-            "Contracts to sell", min_value=1, value=1, step=1,
-            max_value=(affordable if affordable and affordable >= 1 else None),
-            key=f"investigate_qty_{c['ticker']}_{c['strike']:g}_{c['expiration']}",
-        )
-    with qc2:
-        if cap_amt is not None:
-            st.metric("Buying capacity", f"${cap_amt:,.0f}",
-                      help="Available cash / buying power from Schwab.")
-        else:
-            st.caption("Buying capacity unavailable (Schwab not reachable).")
-
-    if affordable is not None:
-        st.caption(f"You could sell up to **{affordable}** of this put "
-                   f"(${c['strike'] * 100:,.0f} collateral each).")
-
-    # Order preview — validation only; nothing is placed.
-    try:
-        order = trade_actions.build_put_sell_order(
-            ticker=c["ticker"], strike=c["strike"], expiration=c["expiration"],
-            limit=float(limit), quantity=int(qty), capacity=cap_amt,
-        )
-        st.success(
-            f"**Order preview:** {order.describe()} — credit "
-            f"**${order.credit:,.0f}**, collateral **${order.collateral:,.0f}**."
-        )
-    except ValueError as exc:
-        st.error(f"Can't build this order: {exc}")
-
-    st.button(
-        "Place Trade", disabled=True,
-        help="Order placement isn't wired up yet — coming in a future update.",
-    )
-    st.caption("Placement is disabled — this previews the order only. "
-               "Always verify at your broker.")
 
 
 def build_leaderboard(results: list[dict], side: str, min_oi: int,
@@ -292,6 +366,11 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
         for r in results
         if r.get("df") is not None and not r["df"].empty
     }
+    # Next earnings date per ticker (the board carries only the 0/1 flag).
+    ticker_earnings = {
+        r["position"]["ticker"]: (r.get("earnings_dates") or [None])[0]
+        for r in results
+    }
 
     rendered_any = False
     for side in sides:
@@ -305,7 +384,7 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
         _render_table(board, side, min_vol,
                       investigate=(allow_investigate and side == "put"),
                       min_oi=min_oi, top_n=top_n, ticker_dfs=ticker_dfs,
-                      provider=provider)
+                      ticker_earnings=ticker_earnings, provider=provider)
 
     if not rendered_any:
         st.info(
@@ -326,12 +405,14 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
 def _render_table(board: pd.DataFrame, side: str, min_vol: int,
                   investigate: bool = False, min_oi: int = 25, top_n: int = 5,
                   ticker_dfs: dict | None = None,
+                  ticker_earnings: dict | None = None,
                   provider: str = "yahoo") -> None:
     """Render one leaderboard table, styled like the scan-results table.
 
     When `investigate` is True the table becomes single-row-selectable and
     selecting a row opens the assisted put-selling dialog. `min_oi`/`top_n`/
-    `ticker_dfs`/`provider` feed that dialog's IV chart.
+    `ticker_dfs`/`provider` feed that dialog's IV chart; `ticker_earnings`
+    supplies the next-earnings date shown in its snapshot.
     """
     kind = iv_scores.active_kind(board)
 
@@ -452,9 +533,13 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
         "last": _num(row.get("last")) if "last" in board.columns else None,
         "iv": _num(row.get("iv")) if "iv" in board.columns else None,
         "spot": _num(row.get("spot")) if "spot" in board.columns else None,
+        "delta": _num(row.get("delta")) if "delta" in board.columns else None,
+        "ann_pct": (_num(row.get("ann_yield_pct"))
+                    if "ann_yield_pct" in board.columns else None),
         "volume": int(row["volume"]),
         "open_interest": int(row["open_interest"]),
     }
+    contract["next_earnings"] = (ticker_earnings or {}).get(contract["ticker"])
     # Only open the modal on a *new* selection, so dismissing it doesn't
     # immediately reopen on the next rerun while the row stays selected.
     sel_key = f"{contract['ticker']}|{contract['strike']}|{contract['expiration']}"

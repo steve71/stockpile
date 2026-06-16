@@ -35,10 +35,19 @@ Set the callback URL to `https://127.0.0.1:8182/`.
 - after creating this app it also took a few hours before app
   was ready to use.
 
-**When creating the app, request only the permissions this tool
-actually needs: read-only market data and option chain access.
-Do not grant trading or account management permissions — this
-tool never places orders or reads account balances.**
+**Pick the app's API products based on what you'll use:**
+
+- **Market Data Production (default, recommended).** Read-only quotes and
+  option chains — all the scanner itself needs. Safest choice: the
+  resulting token cannot read your account or place orders even if it
+  leaks.
+- **Accounts and Trading Production (optional).** Only needed for the
+  watchlist's assisted put-selling feature (Sell mode → the **Sell Put**
+  dialog), which reads your **account balances** to size cash-secured puts
+  and previews orders. Order *placement is not enabled* — the Place Trade
+  button is disabled — but adding this product grants the token the ability
+  to read balances and (in principle) place orders, so a leaked token is
+  far more dangerous. Skip it unless you want that feature.
 
 > **Keep your App Key and App Secret private.** Anyone who has
 > them can make API calls on your behalf. Never commit them to
@@ -134,8 +143,9 @@ Notes:
 data. On a shared or cloud host, protect it accordingly — and prefer
 running locally when you can. `schwab_auth.py` chmods both `config.toml`
 and the token file to `0600` (owner-only) on POSIX hosts; on Windows that
-is effectively a no-op (ACL-based). Keep the app's permissions read-only
-(step 1) so the token can't place trades even if it leaks.
+is effectively a no-op (ACL-based). If you granted only Market Data
+(step 1), the token can't read your account or place trades even if it
+leaks; if you added Accounts and Trading, it can — secure it accordingly.
 
 ### What's stored, and where to secure it
 
@@ -157,6 +167,27 @@ another machine won't work (it would stop after the first refresh). Your
   app secret, and token **all** live on that host — secure them there.
   Your laptop only runs a browser for the login and stores nothing
   persistent.
+
+### Account info & assisted put-selling (optional)
+
+The watchlist leaderboard's **Sell Put** dialog (Sell mode + Schwab
+selected) shows your account balances and previews cash-secured put
+orders. It needs the **Accounts and Trading Production** product (step 1)
+on your app, in *Ready For Use* status, with your brokerage account linked
+to the app. Newly granted access can take until the next day to activate.
+
+Until it's active, the scanner's market-data quotes keep working but
+account calls return **HTTP 401 "Client not authorized"**, and the dialog
+shows "Cash for puts unavailable". Check status anytime with the read-only
+diagnostic:
+
+```bash
+uv run options-scanner/show_accounts.py
+```
+
+It lists each linked account's balances, or prints a clear message while
+trading access is still pending. **No orders are ever placed** — the Place
+Trade button is disabled.
 
 ## Usage
 
