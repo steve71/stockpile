@@ -515,10 +515,21 @@ days old on LEAPS and other far-dated strikes. GEX computed from
 stale IV is a rougher approximation. The Schwab data source provides
 real-time gamma values from Schwab's own model, which are more reliable.
 
-**Dealer positioning is an assumption.** The standard GEX model
-assumes dealers are net short calls and net long puts. This is
-generally true in aggregate but not always correct for every strike
-or every ticker.
+**Dealer positioning is assumed, not measured.** This is GEX's
+biggest limitation. The model assigns a *sign* to every contract's
+gamma — here, dealers are treated as long calls and short puts (the
+standard SqueezeMetrics convention). That direction is only a
+tendency and is never verifiable from public data: OPRA, Yahoo, and
+Schwab chains report price, size, and open interest, but not whether
+the market maker was the buyer or the seller of each contract.
+Concentrated flows break the assumption — a fund running a
+covered-call program systematically *sells* calls, leaving the dealer
+*long* those calls and flipping the sign of their gamma at those
+strikes. Distinguishing real buyers from sellers needs trade-level,
+market-maker-tagged data (e.g. CBOE's paid Open-Close volume);
+inferring it from the tape (a print above or below the mid) is itself
+an approximation that fails for trades at the midpoint. Treat GEX as
+directional context, not a measured fact.
 
 ## Roll mode example
 
