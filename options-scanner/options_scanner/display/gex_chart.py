@@ -192,9 +192,13 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
         flip_layers = [flip_rule, flip_label]
 
     # Build a screenshot-friendly title: ticker first, then chart type.
-    # Falls back to just the chart name if no ticker is passed.
-    title_text = (f"{ticker} — Gamma Exposure (GEX) by strike"
-                  if ticker else "Gamma Exposure (GEX) by strike")
+    # Falls back to just the chart name if no ticker is passed. The dealer-
+    # positioning warning rides in the title so it's impossible to miss on a
+    # screenshot; the full caveat sits in the caption below the chart.
+    _warn = ("  (⚠️ Dealer positioning is assumed, not measured, "
+             "more details below chart)")
+    title_text = (f"{ticker} — Gamma Exposure (GEX) by strike{_warn}"
+                  if ticker else f"Gamma Exposure (GEX) by strike{_warn}")
 
     # DTE scope footnote so screenshots taken days later still convey
     # which slice of the chain the bars are summed over.
@@ -235,3 +239,10 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
         else "GEX computed from Schwab's native gamma values."
     )
     st.caption(f"{dte_note} {provider_caveat}")
+    st.caption(
+        "⚠️ **Dealer positioning is assumed, not measured.** GEX treats "
+        "dealers as long calls / short puts — a market-wide tendency, not "
+        "verifiable without trade-level data. Concentrated flows (e.g. funds "
+        "writing covered calls) can flip the real sign. Use as directional "
+        "context, not fact."
+    )

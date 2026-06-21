@@ -103,7 +103,11 @@ def tab_gex() -> None:
                 "<b>Amp Zone</b> (largest negative GEX — moves tend to accelerate), "
                 "and <b>Gamma flip</b> (the zero-gamma level where the regime "
                 "switches from pinning to amplifying). "
-                "Diagnostic context, not a directional signal."
+                "Diagnostic context, not a directional signal. "
+                "<b>Note:</b> GEX assumes dealers are long calls / short "
+                "puts — a market-wide tendency, not verifiable per strike; "
+                "concentrated flows (e.g. covered-call funds) can flip the "
+                "sign. See the README's caveats."
                 "</div>"
                 "</details>"
                 "</div>",
