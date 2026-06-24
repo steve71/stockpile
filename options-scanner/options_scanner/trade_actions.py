@@ -9,8 +9,9 @@ Streamlit so they're unit-testable.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Liquidity thresholds — a deliberately conservative first guess at "would a
 # limit order here have a good chance of filling at favorable terms?". These
@@ -55,6 +56,18 @@ def round_to_tick(price: float) -> float:
     """
     tick = tick_for(price)
     return round(round(price / tick) * tick, 2)
+
+
+def ceil_to_tick(price: float) -> float:
+    """Round UP to the conventional option tick.
+
+    Used for buy-to-close limits, where rounding the mid up to the next tick
+    biases the proposed limit toward a fill rather than away from one (e.g. a
+    3.92 mid → 3.95). A tiny epsilon keeps a price already sitting on a tick
+    from jumping a full tick on float-division noise (3.95 stays 3.95).
+    """
+    tick = tick_for(price)
+    return round(math.ceil(price / tick - 1e-9) * tick, 2)
 
 
 def assess_fill(*, bid, ask, mid=None, volume=None, open_interest=0,
@@ -213,9 +226,10 @@ def puts_affordable(capacity: float | None, strike: float | None) -> int | None:
 class PutSellOrder:
     """A single-leg, sell-to-open, cash-secured short put.
 
-    Describes exactly what would be sent; it does NOT place anything. The
-    placement step (schwab-py ``option_sell_to_open_limit`` →
-    ``client.place_order``) is intentionally not wired yet.
+    Describes exactly what will be sent. Building it never places anything;
+    ``place_put_sell_order`` (schwab-py ``option_sell_to_open_limit`` →
+    ``client.place_order``) performs the LIVE submission, and only after the
+    user's explicit confirm in the dialog.
     """
 
     ticker: str
@@ -267,6 +281,243 @@ def build_put_sell_order(*, ticker: str, strike: float, expiration: str,
     return order
 
 
+# ── Market hours + LIVE placement (only ever reached behind a confirm step) ──
+
+def market_is_open(client) -> bool | None:
+    """True/False if the equity-options market is open RIGHT NOW, None unknown.
+
+    Schwab's `isOpen` flag only means "today is a trading day" — it stays True
+    after the close — so we also test the current instant against the day's
+    regular-session window. Schwab returns those session times as tz-aware ISO
+    timestamps (…-04:00); comparing them to a tz-aware UTC `now` is correct no
+    matter the machine's local timezone (it never reads the local clock's
+    zone). `isOpen` still gates weekends/holidays. None on any failure → the
+    caller fails safe and keeps placement disabled.
+    """
+    try:
+        from schwab.client import Client
+        resp = client.get_market_hours(
+            markets=[Client.MarketHours.Market.OPTION])
+        eqo = resp.json().get("option", {}).get("EQO", {})
+        if not eqo.get("isOpen"):
+            return False  # weekend / holiday — not a trading day
+        now = datetime.now(timezone.utc)
+        sessions = (eqo.get("sessionHours") or {}).get("regularMarket") or []
+        for s in sessions:
+            start = datetime.fromisoformat(s["start"])
+            end = datetime.fromisoformat(s["end"])
+            if start <= now <= end:
+                return True
+        return False  # trading day, but outside the regular session
+    except Exception:
+        return None
+
+
+def resolve_account_hash(client, last4: str | None = None):
+    """Return (account_hash, masked_number) for the order's target account.
+
+    With a single linked account, uses it. With several, requires `last4` to
+    pick exactly one — so a live order can never land in the wrong account.
+    Returns None when nothing matches unambiguously or the lookup fails.
+    """
+    try:
+        nums = client.get_account_numbers().json()
+        if not isinstance(nums, list) or not nums:
+            return None
+        if last4:
+            matches = [n for n in nums
+                       if str(n.get("accountNumber", "")).endswith(str(last4))]
+            if len(matches) == 1:
+                m = matches[0]
+                return m["hashValue"], _mask_account(m.get("accountNumber"))
+            return None
+        if len(nums) == 1:
+            return nums[0]["hashValue"], _mask_account(
+                nums[0].get("accountNumber"))
+        return None
+    except Exception:
+        return None
+
+
+def _put_osi(ticker: str, strike: float, expiration: str) -> str:
+    """OSI option symbol for a put. schwab-py's OptionSymbol wants a date
+    object (or YYMMDD), not the YYYY-MM-DD string the rest of the app uses."""
+    from schwab.orders.options import OptionSymbol
+    exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+    return OptionSymbol(ticker, exp_date, "P", f"{float(strike):g}").build()
+
+
+def _submit_spec(client, account_hash: str, spec) -> dict:
+    """POST a built order spec; return {ok, order_id, error}. Surfaces
+    Schwab's error payload on a non-2xx rather than raising."""
+    try:
+        resp = client.place_order(account_hash, spec)
+    except Exception as exc:  # noqa: BLE001 — surface any transport error
+        return {"ok": False, "order_id": None, "error": str(exc)}
+    if resp.status_code not in (200, 201):
+        try:
+            detail = resp.json().get("errors", [{}])[0].get("detail")
+        except Exception:
+            detail = None
+        return {"ok": False, "order_id": None,
+                "error": detail or f"HTTP {resp.status_code}"}
+    order_id = None
+    try:
+        from schwab.utils import Utils
+        order_id = Utils(client, account_hash).extract_order_id(resp)
+    except Exception:
+        order_id = None
+    if not order_id:
+        # Fallback: pull the trailing id from the Location header ourselves, so
+        # in-app status/cancel still work if schwab-py's parser comes up empty.
+        loc = getattr(resp, "headers", {}).get("Location", "") or ""
+        tail = loc.rstrip("/").rsplit("/", 1)[-1] if loc else ""
+        if tail.isdigit():
+            order_id = tail
+    return {"ok": True, "order_id": order_id, "error": None}
+
+
+def place_put_sell_order(client, order: PutSellOrder, account_hash: str) -> dict:
+    """Submit a single-leg, sell-to-open cash-secured put. LIVE — real order.
+
+    Only ever called after the user's explicit confirm. Re-asserts guardrail
+    #1 (qty >= 1, positive limit/strike, put + sell-to-open only) before
+    sending. Returns {"ok", "order_id", "error"}.
+    """
+    if order.quantity < 1 or order.limit <= 0 or order.strike <= 0:
+        return {"ok": False, "order_id": None, "error": "invalid order"}
+    try:
+        from schwab.orders.options import option_sell_to_open_limit
+        spec = option_sell_to_open_limit(
+            _put_osi(order.ticker, order.strike, order.expiration),
+            int(order.quantity), f"{order.limit:.2f}")
+    except Exception as exc:  # noqa: BLE001 — bad date / build failure
+        return {"ok": False, "order_id": None, "error": str(exc)}
+    return _submit_spec(client, account_hash, spec)
+
+
+def place_put_close_order(client, *, ticker: str, strike: float,
+                          expiration: str, limit: float, quantity: int,
+                          account_hash: str) -> dict:
+    """Submit a BUY_TO_CLOSE limit on an existing short put. LIVE — real order.
+
+    The closing mirror of place_put_sell_order: buys back the put to close,
+    only after the user's explicit confirm. `limit` is the debit per share.
+    """
+    if int(quantity) < 1 or float(limit) <= 0 or float(strike) <= 0:
+        return {"ok": False, "order_id": None, "error": "invalid order"}
+    try:
+        from schwab.orders.options import option_buy_to_close_limit
+        spec = option_buy_to_close_limit(
+            _put_osi(ticker, strike, expiration),
+            int(quantity), f"{float(limit):.2f}")
+    except Exception as exc:  # noqa: BLE001 — bad date / build failure
+        return {"ok": False, "order_id": None, "error": str(exc)}
+    return _submit_spec(client, account_hash, spec)
+
+
+# Order statuses where a cancel still makes sense (not yet terminal).
+CANCELLABLE_STATUSES = frozenset({
+    "WORKING", "QUEUED", "ACCEPTED", "NEW", "PENDING_ACTIVATION",
+    "PENDING_ACKNOWLEDGEMENT", "AWAITING_PARENT_ORDER", "AWAITING_CONDITION",
+    "AWAITING_MANUAL_REVIEW", "AWAITING_RELEASE_TIME",
+    "AWAITING_STOP_CONDITION", "AWAITING_UR_OUT",
+})
+
+
+def _avg_fill_price(order: dict) -> float | None:
+    """Quantity-weighted average execution price from a Schwab order, or None.
+
+    Schwab reports each fill under ``orderActivityCollection[].executionLegs[]``
+    with a per-share ``price`` and ``quantity``; a marketable order can fill in
+    several legs/partials, so average them by quantity. None when no execution
+    legs are present yet (e.g. still working / unfilled)."""
+    px_qty = 0.0
+    qty = 0.0
+    for act in (order.get("orderActivityCollection") or []):
+        if act.get("activityType") != "EXECUTION":
+            continue
+        for leg in (act.get("executionLegs") or []):
+            try:
+                _px = float(leg.get("price"))
+                _q = float(leg.get("quantity", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if _q > 0:
+                px_qty += _px * _q
+                qty += _q
+    return round(px_qty / qty, 4) if qty > 0 else None
+
+
+def get_order_status(client, order_id, last4: str | None = None) -> dict | None:
+    """Read-only broker status for one order.
+
+    Returns {status, filled, quantity, remaining, cancelable, filled_at,
+    fill_price} or None on any failure. `cancelable` is True while the order is
+    live but not yet terminal (so the UI can offer Cancel and avoid implying an
+    unfilled order is a real position). `fill_price` is the quantity-weighted
+    average execution price once any legs have filled, else None.
+    """
+    if not order_id:
+        return None
+    resolved = resolve_account_hash(client, last4)
+    if not resolved:
+        return None
+    account_hash, _ = resolved
+    try:
+        resp = client.get_order(order_id, account_hash)
+        if resp.status_code != 200:
+            return None
+        d = resp.json()
+    except Exception:
+        return None
+    status = d.get("status")
+    # Fill time: Schwab's closeTime is when the order reached its terminal
+    # state (= the fill, for a FILLED order). Parsed to local time, or None.
+    filled_at = None
+    _ct = d.get("closeTime")
+    if status == "FILLED" and _ct:
+        try:
+            filled_at = datetime.fromisoformat(
+                _ct.replace("Z", "+00:00")).astimezone()
+        except Exception:
+            filled_at = None
+    return {
+        "status": status,
+        "filled": d.get("filledQuantity"),
+        "quantity": d.get("quantity"),
+        "remaining": d.get("remainingQuantity"),
+        "cancelable": status in CANCELLABLE_STATUSES,
+        "filled_at": filled_at,
+        "fill_price": _avg_fill_price(d),
+    }
+
+
+def cancel_order(client, order_id, last4: str | None = None) -> dict:
+    """Cancel a working order. Returns {ok, error}.
+
+    Canceling an unfilled order changes no position (no money moves); still
+    routed through the same account resolution as placement.
+    """
+    if not order_id:
+        return {"ok": False, "error": "no order id"}
+    resolved = resolve_account_hash(client, last4)
+    if not resolved:
+        return {"ok": False, "error": "account not resolved"}
+    account_hash, _ = resolved
+    try:
+        resp = client.cancel_order(order_id, account_hash)
+    except Exception as exc:  # noqa: BLE001 — surface any transport error
+        return {"ok": False, "error": str(exc)}
+    if resp.status_code not in (200, 201):
+        try:
+            detail = resp.json().get("errors", [{}])[0].get("detail")
+        except Exception:
+            detail = None
+        return {"ok": False, "error": detail or f"HTTP {resp.status_code}"}
+    return {"ok": True, "error": None}
+
+
 # ── Live re-quote (read-only) ────────────────────────────────────────────────
 
 def requote_put(client, ticker: str, expiration: str,
@@ -274,7 +525,8 @@ def requote_put(client, ticker: str, expiration: str,
     """Fresh bid/ask/mid/last for one put via the existing chain fetch.
 
     Read-only; reuses ``schwab_live.fetch_option_chain_schwab``. Returns
-    {bid, ask, mid, last} or None when unavailable.
+    {bid, ask, mid, last, volume, open_interest, iv, delta} or None when
+    unavailable (iv as a fraction; iv/delta are None when Schwab omits them).
     """
     from stocks_shared.schwab_live import fetch_option_chain_schwab
     try:
@@ -291,4 +543,62 @@ def requote_put(client, ticker: str, expiration: str,
     ask = float(r.get("ask", 0) or 0)
     last = float(r.get("lastPrice", 0) or 0)
     mid = (bid + ask) / 2 if bid > 0 and ask > 0 else last
-    return {"bid": bid, "ask": ask, "mid": mid, "last": last}
+    _vol_pct = float(r.get("volatility", 0) or 0)   # Schwab IV is a percent
+    _delta = float(r.get("delta", 0) or 0)
+    return {"bid": bid, "ask": ask, "mid": mid, "last": last,
+            "volume": int(r.get("volume", 0) or 0),
+            "open_interest": int(r.get("openInterest", 0) or 0),
+            "iv": (_vol_pct / 100.0) if _vol_pct else None,
+            "delta": _delta if _delta else None}
+
+
+# Rate for the implied-vol/delta back-out below. Delta is only weakly
+# sensitive to it at the short tenors put-sellers trade.
+_FILL_SNAPSHOT_RISK_FREE = 0.045
+
+
+def fill_snapshot(client, ticker: str, expiration: str, strike: float,
+                  fill_price: float, filled_at,
+                  risk_free: float = _FILL_SNAPSHOT_RISK_FREE) -> dict | None:
+    """Reconstruct the underlying spot and option delta at an order's fill.
+
+    The underlying's 1-minute bar nearest ``filled_at`` (a datetime) gives the
+    spot; the implied vol backed out of the actual ``fill_price`` (premium per
+    share) at that spot yields a delta consistent with both. Returns
+    ``{fill_spot, fill_delta, fill_iv}`` (fill_delta/fill_iv None when no sane
+    IV solves, e.g. a print at/below intrinsic), or None when the fill bar
+    can't be located — the fill predates available intraday history or fell
+    outside the minute-bar session.
+    """
+    from datetime import time as _dtime
+    from stocks_shared.schwab_live import fetch_price_history_schwab
+    from stocks_shared.black_scholes import bs_delta, implied_vol
+    if not filled_at or not fill_price or fill_price <= 0:
+        return None
+    try:
+        target = filled_at.timestamp()            # UTC epoch, tz-correct
+        candles = fetch_price_history_schwab(client, ticker, "1m", limit=5000)
+    except Exception:
+        return None
+    if not candles:
+        return None
+    bar = min(candles, key=lambda c: abs(c["time"] - target))
+    if abs(bar["time"] - target) > 30 * 60:       # no bar within 30m of fill
+        return None
+    spot = float(bar["close"])
+    if spot <= 0:
+        return None
+    try:
+        exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+        fa_local = filled_at.astimezone().replace(tzinfo=None)
+        exp_dt = datetime.combine(exp_date, _dtime(16, 0))  # expiry at close
+        T = max((exp_dt - fa_local).total_seconds(), 0.0) / (365.0 * 86400.0)
+    except Exception:
+        return None
+    iv = implied_vol(float(fill_price), spot, float(strike), T, risk_free,
+                     "put")
+    delta = (bs_delta(spot, float(strike), T, risk_free, iv, "put")
+             if iv is not None else None)
+    return {"fill_spot": round(spot, 4),
+            "fill_delta": round(delta, 4) if delta is not None else None,
+            "fill_iv": round(iv, 6) if iv is not None else None}

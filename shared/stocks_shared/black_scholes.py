@@ -101,3 +101,36 @@ def prob_above(S: float, K: float, T: float, r: float,
         return 1.0 if S > K else 0.0
     _, d2 = d1_d2(S, K, T, r, sigma)
     return norm_cdf(d2)
+
+
+def implied_vol(price: float, S: float, K: float, T: float, r: float,
+                opt_type: str, *, lo: float = 1e-3, hi: float = 5.0,
+                tol: float = 1e-6, iters: int = 100) -> float | None:
+    """Implied volatility for an observed option `price`, by bisection.
+
+    Returns the sigma that reprices the option to `price` under `bs_price`,
+    or None when the inputs are degenerate or `price` sits below intrinsic
+    (not representable by any non-negative vol). `bs_price` is monotone
+    increasing in sigma, so a bracketed bisection converges reliably; `lo`/`hi`
+    bound the search (0.1%–500% vol) and a price at or beyond a bound clamps
+    to it.
+    """
+    if price is None or price <= 0 or T <= 0 or S <= 0 or K <= 0:
+        return None
+    intrinsic = max(0.0, S - K) if _is_call(opt_type) else max(0.0, K - S)
+    if price < intrinsic - 1e-9:
+        return None
+    if price <= bs_price(S, K, T, r, lo, opt_type):
+        return lo
+    if price >= bs_price(S, K, T, r, hi, opt_type):
+        return hi
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        p = bs_price(S, K, T, r, mid, opt_type)
+        if abs(p - price) < tol:
+            return mid
+        if p < price:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)

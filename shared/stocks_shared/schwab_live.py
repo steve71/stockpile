@@ -14,6 +14,11 @@ log = logging.getLogger(__name__)
 # Schwab refresh tokens expire a fixed 7 days after the initial OAuth login.
 SCHWAB_REFRESH_TOKEN_TTL_DAYS = 7.0
 
+# Bound every Schwab HTTP request so a slow or unreachable endpoint can't hang
+# a caller (e.g. the Trades tab) indefinitely. Applied best-effort to the
+# client's httpx session in get_client.
+SCHWAB_HTTP_TIMEOUT_S = 10.0
+
 
 def token_age_days(token_file: str) -> float | None:
     """Days since the token's initial OAuth login, or None if unknown.
@@ -146,6 +151,16 @@ def get_client(app_key: str, app_secret: str, callback_url: str,
             "Run: uv run options-scanner/schwab_auth.py"
         ) from exc
 
+    # Best-effort: bound every HTTP request this client makes (schwab-py wraps
+    # an httpx session) so a slow/unreachable Schwab endpoint can't hang the
+    # caller. If the client internals ever change, fall back to the library
+    # default rather than break.
+    try:
+        import httpx
+        client.session.timeout = httpx.Timeout(SCHWAB_HTTP_TIMEOUT_S)
+    except Exception:
+        pass
+
     # Re-stat after building: client_from_token_file may refresh-and-rewrite
     # the file on load, and the login flow just created it — cache the
     # post-build mtime so the next call doesn't rebuild needlessly.
@@ -209,16 +224,18 @@ def fetch_option_chain_raw(client, ticker: str, min_dte: int,
 def fetch_option_chain_schwab(client, ticker: str, exp_str: str):
     """Fetch a single expiration for roll close-cost lookup.
 
-    Returns an object with .calls and .puts DataFrames (columns:
-    strike, bid, ask, lastPrice) — same interface as
-    stocks_shared.yahoo.fetch_option_chain().
+    Returns an object with .calls and .puts DataFrames (columns: strike, bid,
+    ask, lastPrice, volume, openInterest, volatility, delta) — same interface
+    as stocks_shared.yahoo.fetch_option_chain().
     """
     import datetime
     from schwab.client import Client
 
     _empty = SimpleNamespace(
-        calls=pd.DataFrame(columns=["strike", "bid", "ask", "lastPrice"]),
-        puts=pd.DataFrame(columns=["strike", "bid", "ask", "lastPrice"]),
+        calls=pd.DataFrame(columns=["strike", "bid", "ask", "lastPrice", "volume", "openInterest",
+                  "volatility", "delta"]),
+        puts=pd.DataFrame(columns=["strike", "bid", "ask", "lastPrice", "volume", "openInterest",
+                  "volatility", "delta"]),
     )
 
     try:
@@ -253,9 +270,14 @@ def fetch_option_chain_schwab(client, ticker: str, exp_str: str):
                         "bid":       float(opt.get("bid", 0) or 0),
                         "ask":       float(opt.get("ask", 0) or 0),
                         "lastPrice": float(opt.get("last", 0) or 0),
+                        "volume":    int(opt.get("totalVolume", 0) or 0),
+                        "openInterest": int(opt.get("openInterest", 0) or 0),
+                        "volatility": float(opt.get("volatility", 0) or 0),
+                        "delta":     float(opt.get("delta", 0) or 0),
                     })
         return pd.DataFrame(rows) if rows else pd.DataFrame(
-            columns=["strike", "bid", "ask", "lastPrice"])
+            columns=["strike", "bid", "ask", "lastPrice", "volume", "openInterest",
+                  "volatility", "delta"])
 
     return SimpleNamespace(
         calls=_parse_side(data.get("callExpDateMap", {})),

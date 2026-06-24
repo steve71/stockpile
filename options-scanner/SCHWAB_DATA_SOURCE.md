@@ -41,13 +41,13 @@ Set the callback URL to `https://127.0.0.1:8182/`.
   option chains — all the scanner itself needs. Safest choice: the
   resulting token cannot read your account or place orders even if it
   leaks.
-- **Accounts and Trading Production (optional).** Only needed for the
-  watchlist's assisted put-selling feature (Sell mode → the **Sell Put**
-  dialog), which reads your **account balances** to size cash-secured puts
-  and previews orders. Order *placement is not enabled* — the Place Trade
-  button is disabled — but adding this product grants the token the ability
-  to read balances and (in principle) place orders, so a leaked token is
-  far more dangerous. Skip it unless you want that feature.
+- **Accounts and Trading Production (optional).** Needed for the watchlist's
+  assisted put-selling feature (Sell mode → the **Sell Put** dialog), which
+  reads your **account balances** to size cash-secured puts and **can place
+  and close orders**. Placement is real but heavily gated — see "Live order
+  placement" below. Adding this product grants the token the ability to read
+  balances and place orders, so a leaked token is far more dangerous; skip it
+  unless you want that feature.
 
 > **Keep your App Key and App Secret private.** Anyone who has
 > them can make API calls on your behalf. Never commit them to
@@ -147,6 +147,34 @@ is effectively a no-op (ACL-based). If you granted only Market Data
 (step 1), the token can't read your account or place trades even if it
 leaks; if you added Accounts and Trading, it can — secure it accordingly.
 
+#### Alternative: VS Code Remote-SSH (browser flow on a remote host)
+
+Contributed by BitraAI. If you reach the remote host through VS Code's
+Remote-SSH, you can skip `--manual` entirely — VS Code forwards the
+loopback callback port back to your laptop, so the normal browser flow
+works as if you were running locally.
+
+1. Open VS Code **Settings** and uncheck **Remote.SSH: Use Exec
+   Server**.
+2. **Add New SSH Host…** and log in to the remote host.
+3. Update `app_key` and `app_secret` in
+   `stockpile/options-scanner/config.toml`.
+4. Create the config dir (if needed) and run the auth script:
+
+```bash
+mkdir .config
+cd stockpile
+uv run options-scanner/schwab_auth.py
+```
+
+This opens a browser to log in to Schwab. Once complete, you'll see:
+
+```
+schwab-py callback received! You may now close this window/tab.
+```
+
+The token is saved to `~/.config/schwab-token.json`.
+
 ### What's stored, and where to secure it
 
 Two files hold secrets, and they live **together on whichever single host
@@ -186,8 +214,33 @@ uv run options-scanner/show_accounts.py
 ```
 
 It lists each linked account's balances, or prints a clear message while
-trading access is still pending. **No orders are ever placed** — the Place
-Trade button is disabled.
+trading access is still pending.
+
+### Live order placement
+
+The **Sell Put** dialog can place a real cash-secured put, and the
+**Trades** tab can buy it back to close. Real-money placement is gated four
+ways:
+
+1. **`paper` flag (config, default `true`).** This is the master arm switch.
+   While `paper = true`, confirming records a *simulated* trade and sends
+   **nothing** to Schwab. Set **`paper = false`** in `config.toml` to send
+   live orders. A *live* open position can likewise only be closed with a
+   real order when `paper = false`.
+2. **Market hours.** Place Trade / Place Closing Trade are enabled only when
+   Schwab reports the equity-options market open (it stays disabled, and
+   says so, outside 9:30–16:00 ET on trading days, or if hours can't be
+   confirmed).
+3. **Two-step confirm.** Place Trade opens an inline review panel (order,
+   account, credit/collateral, LIVE/PAPER); nothing is sent until you click
+   **Confirm**.
+4. **Guardrails in code.** Single-leg, sell-to-open (or buy-to-close) puts
+   only; quantity/limit validated; collateral capped at your cash-secured
+   capacity; the order targets the specific linked account shown.
+
+There is **no Schwab paper/sandbox** for the API this tool uses (schwab-py
+talks only to production), so `paper = false` orders are real. Test the flow
+in paper mode first, and always verify at your broker.
 
 ## Usage
 

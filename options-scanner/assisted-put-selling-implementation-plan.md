@@ -98,21 +98,29 @@ IV+pp ranking, which already answers "is this a good trade?".
   available cash / buying power (read-only, `get_account_numbers` +
   `get_account`), cached 60s in the dialog. `puts_affordable` =
   capacity ÷ (strike × 100) caps the quantity input.
-- **DONE — order builder (validation only).** `build_put_sell_order`
-  returns a `PutSellOrder` (credit/collateral/describe) and enforces
-  guardrail #1 (qty ≥ 1, limit > 0, strike > 0, collateral ≤ capacity).
-  TODO: map it to schwab-py `option_sell_to_open_limit` +
-  `client.place_order` — **intentionally not wired** ("don't allow
-  trades"). The dialog shows the order preview; Place Trade is disabled.
-- **DONE — approval-gate UI (minus the gate).** Contracts-to-sell input
-  (capped by capacity), capacity metric, and a live order preview
-  (order string + credit + collateral) in the dialog. TODO: enable Place
-  Trade after a "go" + a final confirm step + paper/live badge + record
-  to the store.
-- **Schwab trading scope** (still TODO) — confirm OAuth scope / account
-  trading-enabled / order-entry endpoint before wiring `place_order`.
+- **DONE — order builder + LIVE placement.** `build_put_sell_order` returns
+  a validated `PutSellOrder` (guardrail #1: qty ≥ 1, limit > 0, strike > 0,
+  collateral ≤ capacity); `place_put_sell_order` maps it to schwab-py
+  `option_sell_to_open_limit` → `client.place_order` (now WIRED — see
+  Phase 2.5).
+- **DONE — approval gate.** Contracts-to-sell (capped by capacity), capacity
+  metric, live order preview, **two-step confirm**, paper/live badge, and
+  recording to the store — all built.
+- **DONE — Schwab trading scope.** "Accounts and Trading Production" access
+  confirmed live on the linked account.
 
-## Phase 2.5 — Placement wiring sketch (2026-06-15: access now LIVE)
+## Phase 2.5 — Placement (2026-06-16: BUILT)
+
+**STATUS: order placement + closing are now wired** (uncommitted working
+tree, 2026-06-16). The sketch below was implemented as-is. Opening:
+`trade_actions.place_put_sell_order` (`OptionSymbol` →
+`option_sell_to_open_limit` → `client.place_order`). Closing:
+`place_put_close_order` (`option_buy_to_close_limit`). Both behind: a
+**market-hours gate**
+(`market_is_open`), a **two-step inline confirm**, and the **`paper` flag**
+(live only when `paper=false`); they target the account from
+`resolve_account_hash` and log to `trades_store`. See the Sell Put dialog
+(`leaderboard.py`) and the Trades tab (`tabs/trades.py`).
 
 **Access confirmed.** The Schwab app now has **"Accounts and Trading
 Production"** in *Ready For Use* status, with a MARGIN, options-enabled
@@ -130,9 +138,10 @@ non-marginable cash, not the (larger) margin buying power. The full
 `currentBalances` is surfaced read-only in the dialog's collapsed
 **Account info** panel.
 
-The wiring below is the ONLY remaining gap. It stays **disabled** until the
-user explicitly says "enable trades". Real money — there is no Schwab paper/
-sandbox; `place_order` hits the live account.
+Real money — there is no Schwab paper/sandbox for schwab-py (it talks only
+to production), so a `paper=false` `place_order` hits the live account. The
+`paper` flag + market gate + confirm step are the guardrails. The detailed
+design that was implemented follows.
 
 1. **Resolve the account (don't blind-index `nums[0]`).** Add `account_id`
    (the account's last-4) to `[schwab]` config; match it against
@@ -171,8 +180,9 @@ open order in the store for idempotency.
 
 ## Phase 3 — Trade tracker tab (P/L + closing)
 
-**DONE (scaffold).** New top-level "Trades" tab (`tabs/trades.py`, wired
-into `run_app.py` after Watchlist). Empty until placement is enabled.
+**DONE.** Top-level "Trades" tab (`tabs/trades.py`, wired into `run_app.py`
+after Watchlist). Lists placed put-sells with live P/L + cost-to-close, and
+closes them (see closing flow below). Populated once you place a trade.
 
 - **DONE — store** (`trades_store.py`): single gitignored JSON
   (`options-scanner/trades/`) with `load/add/update/remove`; records
@@ -182,11 +192,13 @@ into `run_app.py` after Watchlist). Empty until placement is enabled.
 - **DONE — per-position view:** live **cost-to-close** (`requote_put`
   mid, cached 30s) and **unrealized P/L** (credit − close cost) × 100 ×
   qty, plus status. TODO: DTE + LT-cap-gains qualifying date.
-- **DONE — closing flow UI (disabled):** suggested close limit
-  (re-quote mid → tick), editable, with a disabled **Place Closing
-  Trade** button. TODO: `build_put_close_order` (BUY_TO_CLOSE PUT, LIMIT)
-  → `place_order`, same guardrails + confirm; flip status to closed in
-  the store.
+- **DONE — closing flow (WIRED):** suggested close limit (re-quote mid →
+  tick), editable, then **Place Closing Trade** →
+  `place_put_close_order` (`option_buy_to_close_limit` → `place_order`) under
+  the same market-hours gate + two-step confirm + `paper` flag. A live
+  position closes with a real order only when `paper=false`; a paper trade
+  closes in the tracker only. On success the store flips to `closed` with
+  `close_cost`/`closed_at`.
 - **DONE — verify-at-broker caveat** shown throughout.
 
 ## Schwab API specifics to confirm

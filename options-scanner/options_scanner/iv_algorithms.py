@@ -258,6 +258,73 @@ def _per_expiration(df: pd.DataFrame, fit_mask: np.ndarray,
     return (iv_fitted, methods) if fitted_any else (None, None)
 
 
+def _earnings_segmented(df: pd.DataFrame, fit_mask: np.ndarray,
+                        weights: str = "none", robust: str = "none"):
+    """Fit a separate global-poly surface per earnings regime — exclude nothing.
+
+    Earnings inject a *step* into the term structure: an expiration that
+    crosses the next print carries a fixed extra jump variance its just-
+    before neighbour doesn't, which a single smooth surface can't represent
+    (and excluding the spanners just fits the rest on a thinner slice). Here
+    rows are grouped by ``earnings_count`` — the number of prints inside each
+    option's [now, expiration] window: 0 = pre-earnings, 1 = spans the next
+    print, 2 = spans two, … Each group spans a *smooth* term structure (a
+    constant jump count), so ``_global_poly`` fits it cleanly, and every
+    option is scored against *its own* regime — so the common earnings
+    premium becomes that regime's baseline rather than a per-option signal.
+
+    Intended to pair with a filter set that does NOT include
+    ``exclude_earnings`` (nothing is dropped for spanning a print); with
+    exclude_earnings still on, a spanning regime has no fit rows and falls
+    back to the all-rows surface, degrading to the current behaviour.
+
+    Thin regimes (too few rows for even the 5-term surface — e.g. a lone
+    pre-earnings weekly) borrow the all-rows global surface, then the
+    regime's mean IV, mirroring ``_per_expiration``'s fallback.
+
+    Returns (iv_fitted, methods): "global" for an own-regime fit, "fallback"
+    for borrowed, "none" for an unfittable regime. (None, None) if nothing fit.
+    """
+    if "earnings_count" not in df.columns:
+        return _global_poly(df, fit_mask, weights, robust)
+
+    seg = df["earnings_count"].fillna(0).astype(int)
+    iv_fitted = df["iv"].to_numpy(dtype=float).copy()
+    methods = np.full(len(df), "none", dtype=object)
+    fitted_any = False
+    global_arr = None
+    global_done = False
+
+    for _, idx in df.groupby(seg).groups.items():
+        positions = df.index.get_indexer(idx)
+        sub = df.loc[idx]
+        sub_mask = fit_mask[positions]
+
+        seg_fitted, _ = _global_poly(sub, sub_mask, weights, robust)
+        if seg_fitted is not None:
+            iv_fitted[positions] = seg_fitted
+            methods[positions] = "global"
+            fitted_any = True
+            continue
+
+        # Regime too thin for its own surface — borrow the all-rows global
+        # fit, then the regime's mean IV (same fallback ladder as per_expiry).
+        if not global_done:
+            global_arr, _ = _global_poly(df, fit_mask, weights, robust)
+            global_done = True
+        if global_arr is not None:
+            iv_fitted[positions] = global_arr[positions]
+            methods[positions] = "fallback"
+            fitted_any = True
+        elif sub_mask.any():
+            iv_fitted[positions] = float(
+                sub["iv"].to_numpy(dtype=float)[sub_mask].mean())
+            methods[positions] = "fallback"
+            fitted_any = True
+
+    return (iv_fitted, methods) if fitted_any else (None, None)
+
+
 def _svi(df: pd.DataFrame, fit_mask: np.ndarray, **kwargs) -> np.ndarray | None:
     """Stochastic-Volatility-Inspired surface — extension point, not yet built.
 
@@ -282,6 +349,12 @@ REGISTRY: dict[str, dict] = {
         "fn":       _per_expiration,
         "defaults": {"weights": "none", "robust": "none"},
         "label":    "Per-expiration polynomial",
+        "enabled":  True,
+    },
+    "earnings_segmented": {
+        "fn":       _earnings_segmented,
+        "defaults": {"weights": "none", "robust": "none"},
+        "label":    "Earnings-segmented (per-regime, no exclusion)",
         "enabled":  True,
     },
     "svi": {

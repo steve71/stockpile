@@ -31,6 +31,7 @@ def fetch_spot_meta(ticker: str, data_source: str) -> dict:
 
     Returns a dict with keys:
         pct_change:    float % change or None
+        spot:          current underlying price or None
         last_trade_ts: timezone-aware datetime or None
         source_label: "Yahoo Finance" or "Schwab"
         source_key:   "yahoo" or "schwab"
@@ -41,6 +42,7 @@ def fetch_spot_meta(ticker: str, data_source: str) -> dict:
     """
     result = {
         "pct_change":    None,
+        "spot":          None,
         "last_trade_ts": None,
         "source_label":  PROVIDER_LABELS.get(data_source, data_source),
         "source_key":    data_source,
@@ -52,6 +54,8 @@ def fetch_spot_meta(ticker: str, data_source: str) -> dict:
             info = yf.Ticker(normalize_ticker(ticker)).fast_info
             last = info.get("lastPrice") or info.get("regularMarketPrice")
             prev = info.get("previousClose")
+            if last:
+                result["spot"] = float(last)
             if last and prev and float(prev) > 0:
                 result["pct_change"] = (
                     (float(last) - float(prev)) / float(prev) * 100.0
@@ -74,6 +78,9 @@ def fetch_spot_meta(ticker: str, data_source: str) -> dict:
         resp = client.get_quotes([sym])
         resp.raise_for_status()
         quote = resp.json().get(sym, {}).get("quote", {})
+        _sp = quote.get("mark") or quote.get("lastPrice")
+        if _sp:
+            result["spot"] = float(_sp)
         pct = quote.get("netPercentChange")
         if pct is not None:
             result["pct_change"] = float(pct)
