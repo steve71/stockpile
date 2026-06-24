@@ -19,6 +19,31 @@ def test_round_to_tick():
     assert ta.round_to_tick(5.28) == 5.30
 
 
+def test_ceil_to_tick():
+    assert ta.ceil_to_tick(3.92) == 3.95     # nickel tick rounds UP
+    assert ta.ceil_to_tick(2.451) == 2.46    # penny tick rounds UP
+    assert ta.ceil_to_tick(3.90) == 3.90     # already on tick, unchanged
+    assert ta.ceil_to_tick(3.95) == 3.95     # float-noise guard: no jump
+
+
+def test_avg_fill_price_weights_by_quantity():
+    order = {"orderActivityCollection": [
+        {"activityType": "EXECUTION", "executionLegs": [
+            {"price": 3.90, "quantity": 1},
+            {"price": 4.00, "quantity": 3},
+        ]},
+    ]}
+    # (3.90*1 + 4.00*3) / 4 = 3.975
+    assert ta._avg_fill_price(order) == 3.975
+
+
+def test_avg_fill_price_none_without_fills():
+    assert ta._avg_fill_price({}) is None
+    assert ta._avg_fill_price(
+        {"orderActivityCollection": [{"activityType": "ORDER_ACTION"}]}
+    ) is None
+
+
 # ── fill-quality assessment ──────────────────────────────────────────────────
 
 def test_assess_fill_liquid_uses_mid():
@@ -99,3 +124,175 @@ def test_build_put_sell_order_capacity_guard():
         ta.build_put_sell_order(ticker="AAPL", strike=180,
                                 expiration="2026-01-16", limit=2.0, quantity=2,
                                 capacity=20_000)
+
+
+# ── market hours / LIVE placement (fake client, no network) ──────────────────
+
+class _Resp:
+    def __init__(self, code, payload=None, loc=None):
+        self.status_code = code
+        self._p = payload if payload is not None else {}
+        self.headers = {"Location": loc} if loc else {}
+
+    def json(self):
+        return self._p
+
+
+class _FakeClient:
+    """Records place_order calls; returns canned market-hours / accounts."""
+
+    def __init__(self, *, place=None, market=None, accounts=None,
+                 order=None, cancel=None):
+        self._place = place
+        self._market = market
+        self._accounts = accounts
+        self._order = order
+        self._cancel = cancel
+        self.placed = None
+        self.canceled = None
+
+    def place_order(self, account_hash, order_spec):
+        self.placed = (account_hash, order_spec)
+        return self._place
+
+    def get_market_hours(self, markets, date=None):
+        return self._market
+
+    def get_account_numbers(self):
+        return self._accounts
+
+    def get_order(self, order_id, account_hash):
+        return self._order
+
+    def cancel_order(self, order_id, account_hash):
+        self.canceled = (order_id, account_hash)
+        return self._cancel
+
+
+def test_market_is_open_checks_session_window_not_just_isopen():
+    """`isOpen` only means 'today is a trading day' (it stays True after the
+    close), so market_is_open must also test now against the session window —
+    timezone-correctly, via the tz-aware ISO timestamps Schwab returns."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+
+    def sess(start, end):
+        return {"option": {"EQO": {"isOpen": True, "sessionHours": {
+            "regularMarket": [{"start": start.isoformat(),
+                               "end": end.isoformat()}]}}}}
+
+    inside = _Resp(200, sess(now - timedelta(hours=1),
+                             now + timedelta(hours=1)))
+    assert ta.market_is_open(_FakeClient(market=inside)) is True
+
+    # trading day, but the session already ended (e.g. 10pm) → NOT open
+    after = _Resp(200, sess(now - timedelta(hours=8),
+                            now - timedelta(hours=2)))
+    assert ta.market_is_open(_FakeClient(market=after)) is False
+
+    # not a trading day (weekend / holiday) → closed
+    holiday = _Resp(200, {"option": {"EQO": {"isOpen": False}}})
+    assert ta.market_is_open(_FakeClient(market=holiday)) is False
+
+    class _Boom:
+        def get_market_hours(self, markets, date=None):
+            raise RuntimeError("down")
+    assert ta.market_is_open(_Boom()) is None          # fail safe → None
+
+
+def test_resolve_account_hash_single_and_by_last4():
+    accts = _Resp(200, [{"accountNumber": "12345678556", "hashValue": "H1"}])
+    c = _FakeClient(accounts=accts)
+    assert ta.resolve_account_hash(c) == ("H1", "...8556")        # lone account
+    assert ta.resolve_account_hash(c, "8556") == ("H1", "...8556")  # matched
+
+    two = _Resp(200, [{"accountNumber": "111118556", "hashValue": "A"},
+                      {"accountNumber": "222229999", "hashValue": "B"}])
+    c2 = _FakeClient(accounts=two)
+    assert ta.resolve_account_hash(c2) is None                   # ambiguous
+    assert ta.resolve_account_hash(c2, "9999") == ("B", "...9999")
+    assert ta.resolve_account_hash(c2, "0000") is None           # no match
+
+
+def test_place_put_sell_order_submits_sell_to_open_put():
+    order = ta.build_put_sell_order(ticker="AMD", strike=100.0,
+                                    expiration="2026-07-17", limit=1.25,
+                                    quantity=2)
+    c = _FakeClient(place=_Resp(201, loc=".../orders/55"))
+    res = ta.place_put_sell_order(c, order, "HASH")
+    assert res["ok"] is True and res["error"] is None
+    sent_hash, spec = c.placed
+    assert sent_hash == "HASH"                                   # right account
+    leg = spec.build()["orderLegCollection"][0]
+    assert leg["instruction"] == "SELL_TO_OPEN"
+    assert leg["instrument"]["symbol"] == "AMD   260717P00100000"
+    assert leg["quantity"] == 2
+
+
+def test_place_put_sell_order_surfaces_schwab_error():
+    order = ta.build_put_sell_order(ticker="AMD", strike=100.0,
+                                    expiration="2026-07-17", limit=1.25,
+                                    quantity=1)
+    c = _FakeClient(place=_Resp(400, {"errors": [{"detail": "no buying power"}]}))
+    res = ta.place_put_sell_order(c, order, "HASH")
+    assert res["ok"] is False and res["error"] == "no buying power"
+
+
+def test_place_put_sell_order_rejects_invalid_without_calling_broker():
+    bad = ta.PutSellOrder(ticker="AMD", strike=100.0, expiration="2026-07-17",
+                          limit=0.0, quantity=1)   # zero limit
+    c = _FakeClient(place=_Resp(201))
+    res = ta.place_put_sell_order(c, bad, "HASH")
+    assert res["ok"] is False
+    assert c.placed is None                                      # never sent
+
+
+def test_place_put_close_order_submits_buy_to_close():
+    c = _FakeClient(place=_Resp(201, loc=".../orders/77"))
+    res = ta.place_put_close_order(c, ticker="AMD", strike=100.0,
+                                   expiration="2026-07-17", limit=0.40,
+                                   quantity=2, account_hash="HASH")
+    assert res["ok"] is True
+    sent_hash, spec = c.placed
+    assert sent_hash == "HASH"
+    leg = spec.build()["orderLegCollection"][0]
+    assert leg["instruction"] == "BUY_TO_CLOSE"
+    assert leg["instrument"]["symbol"] == "AMD   260717P00100000"
+    assert leg["quantity"] == 2
+
+
+def test_place_put_close_order_rejects_invalid():
+    c = _FakeClient(place=_Resp(201))
+    res = ta.place_put_close_order(c, ticker="AMD", strike=100.0,
+                                   expiration="2026-07-17", limit=0.0,
+                                   quantity=1, account_hash="HASH")
+    assert res["ok"] is False and c.placed is None
+
+
+def test_get_order_status_parses_and_flags_cancelable():
+    accts = _Resp(200, [{"accountNumber": "111118556", "hashValue": "H"}])
+    filled = _FakeClient(accounts=accts,
+                         order=_Resp(200, {"status": "FILLED",
+                                           "filledQuantity": 2, "quantity": 2}))
+    s = ta.get_order_status(filled, "55", "8556")
+    assert s["status"] == "FILLED" and s["cancelable"] is False
+
+    working = _FakeClient(accounts=accts,
+                          order=_Resp(200, {"status": "WORKING",
+                                            "filledQuantity": 0, "quantity": 2}))
+    s2 = ta.get_order_status(working, "55", "8556")
+    assert s2["status"] == "WORKING" and s2["cancelable"] is True
+
+    assert ta.get_order_status(filled, None, "8556") is None   # no order id
+
+
+def test_cancel_order_ok_and_surfaces_error():
+    accts = _Resp(200, [{"accountNumber": "111118556", "hashValue": "H"}])
+    ok = _FakeClient(accounts=accts, cancel=_Resp(200))
+    res = ta.cancel_order(ok, "55", "8556")
+    assert res["ok"] is True
+    assert ok.canceled == ("55", "H")                          # right account
+
+    bad = _FakeClient(accounts=accts,
+                      cancel=_Resp(400, {"errors": [{"detail": "too late"}]}))
+    assert ta.cancel_order(bad, "55", "8556") == {"ok": False, "error": "too late"}

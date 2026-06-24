@@ -368,6 +368,54 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Confirmation queued by an action that then reran (e.g. placing a trade):
+# a toast created right before st.rerun() is discarded with that run, so the
+# producer stashes the message and we show it here on the next run. Rendered
+# as a centered, fully-visible banner (st.toast is top-right + truncates):
+# fades out after ~6s and is click-through. $ → &#36; so it renders literally
+# rather than as LaTeX math.
+_pending_toast = st.session_state.pop("_osc_toast", None)
+if _pending_toast:
+    # Build the centered banner in the parent document via JS (st.markdown
+    # strips inline JS, so a click-to-dismiss × needs a component iframe). It
+    # stays until the user clicks × or 60s elapse; the timeout lives on
+    # window.parent so it survives this iframe being torn down on a rerun.
+    st.iframe(
+        """
+        <script>
+        (function() {
+          const doc = window.parent.document;
+          const prev = doc.getElementById('osc-center-toast');
+          if (prev) prev.remove();
+          const box = doc.createElement('div');
+          box.id = 'osc-center-toast';
+          box.style.cssText = ['position:fixed','top:50%','left:50%',
+            'transform:translate(-50%,-50%)','z-index:1000000','max-width:560px',
+            'background:#16a34a','color:#fff','padding:1.2rem 2.6rem 1.2rem 1.6rem',
+            'border-radius:12px','box-shadow:0 10px 40px rgba(0,0,0,.4)',
+            'font-size:1.08rem','line-height:1.45','text-align:center'].join(';');
+          const msg = doc.createElement('span');
+          msg.textContent = __MSG__;
+          const x = doc.createElement('span');
+          x.textContent = '\\u00d7';
+          x.title = 'Dismiss';
+          x.style.cssText = ['position:absolute','top:6px','right:12px',
+            'cursor:pointer','font-size:1.4rem','line-height:1',
+            'font-weight:700'].join(';');
+          x.onclick = function() { box.remove(); };
+          box.appendChild(x);
+          box.appendChild(msg);
+          doc.body.appendChild(box);
+          window.parent.setTimeout(function() {
+            const b = doc.getElementById('osc-center-toast');
+            if (b) b.remove();
+          }, 60000);
+        })();
+        </script>
+        """.replace("__MSG__", json.dumps(_pending_toast)),
+        height=1, width=1,
+    )
+
 (
     panel_single, panel_watchlist, panel_trades, panel_portfolio, panel_gex,
     panel_spreads, panel_directional, panel_neutral,

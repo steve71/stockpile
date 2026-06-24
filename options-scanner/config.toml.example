@@ -21,6 +21,13 @@ app_secret   = "your-app-secret"
 callback_url = "https://127.0.0.1:8182/"
 token_file   = "~/.config/schwab-token.json"
 
+# Live order placement for the assisted put-selling flow (Sell Put dialog +
+# Trades tab). Default true = SIMULATE: confirming records a paper entry and
+# sends NOTHING to Schwab. Set to false to transmit REAL orders to your broker
+# (still gated by market hours + a two-step confirm). Requires the "Accounts
+# and Trading" API product. See FIRST_TRADE_TEST.md / SCHWAB_DATA_SOURCE.md.
+paper        = true
+
 # ── Moomoo / OpenD credentials ───────────────────────────────────────────────
 # Required only when provider = "moomoo".
 # OpenD (Moomoo's local gateway) must be running before scanning.

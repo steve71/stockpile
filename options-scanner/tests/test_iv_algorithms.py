@@ -335,3 +335,91 @@ def test_single_expiration_fits_with_seven_rows():
     fitted = iv_algorithms.fit(seven, _all(seven),
                                ("global_poly", frozenset()))
     assert fitted is not None and np.allclose(fitted, 0.30)
+
+
+# ── Earnings-segmented (per-regime surface, no exclusion) ────────────────────
+
+def _earnings_chain(spot=100.0, pre_iv=0.30, post_iv=0.45, rich=None):
+    """A chain straddling the next print (~day 25). Pre-earnings expirations
+    (dte ≤ 20) carry earnings_count=0; post-earnings (dte ≥ 30) carry
+    earnings_count=1, elevated by the jump premium. `rich`, if given, is a
+    (strike, expiration) lifted +0.25 — a genuine outlier on top of the
+    regime's common premium."""
+    strikes = [80, 85, 90, 95, 100, 105, 110, 115, 120]
+    df = _chain(
+        spot,
+        [(10, "P1"), (15, "P2"), (20, "P3"),       # pre-earnings  (count 0)
+         (30, "Q1"), (40, "Q2"), (50, "Q3")],      # post-earnings (count 1)
+        strikes,
+        lambda K, t: pre_iv if t <= 20 else post_iv,
+        earnings_count=lambda K, t: 0 if t <= 20 else 1,
+    )
+    if rich is not None:
+        m = (df["strike"] == rich[0]) & (df["expiration"] == rich[1])
+        df.loc[m, "iv"] = df.loc[m, "iv"] + 0.25
+    return df
+
+
+def test_earnings_segmented_fits_each_regime_to_its_own_level():
+    """Each earnings regime is fit on its own data, so pre- and post-print
+    expirations get their own baseline rather than one compromise surface."""
+    df = _earnings_chain()
+    fitted, methods = iv_algorithms.fit(
+        df, _all(df), ("earnings_segmented", frozenset()), return_methods=True)
+    pre = (df["earnings_count"] == 0).to_numpy()
+    post = (df["earnings_count"] == 1).to_numpy()
+    assert np.allclose(fitted[pre], 0.30, atol=1e-6)
+    assert np.allclose(fitted[post], 0.45, atol=1e-6)
+    assert set(np.asarray(methods)) == {"global"}
+
+
+def test_earnings_segmented_without_earnings_column_matches_global():
+    spot = 100.0
+    df = _chain(spot, [(30, "A"), (60, "B"), (90, "C")],
+                [80, 85, 90, 95, 100, 105, 110, 115, 120],
+                lambda K, t: 0.25 + 0.30 * math.log(K / spot) ** 2)
+    seg = iv_algorithms.fit(df, _all(df), ("earnings_segmented", frozenset()))
+    glob = iv_algorithms.fit(df, _all(df), ("global_poly", frozenset()))
+    assert seg is not None and np.allclose(seg, glob)
+
+
+def test_earnings_segmented_flags_only_the_genuine_outlier():
+    """The common earnings premium becomes the post-regime baseline, so an
+    ordinary post-earnings strike reads ~0 excess and only a genuinely rich
+    one stands out. Excluding earnings instead (fitting just the pre surface)
+    makes the WHOLE post regime look rich — the false positives this fixes."""
+    df = _earnings_chain(rich=(110.0, "Q2"))
+    iv = df["iv"].to_numpy()
+    rich = ((df["strike"] == 110.0) & (df["expiration"] == "Q2")).to_numpy()
+    post_ord = (df["earnings_count"] == 1).to_numpy() & ~rich
+
+    seg = iv_algorithms.fit(df, _all(df), ("earnings_segmented", frozenset()))
+    seg_excess = iv - seg
+    assert np.abs(seg_excess[post_ord]).max() < 0.05      # baseline ≈ premium
+    assert seg_excess[rich][0] > np.abs(seg_excess[post_ord]).max() + 0.10
+
+    # Exclude-earnings analogue: fit only the pre regime, score post on it.
+    pre_mask = (df["earnings_count"] == 0).to_numpy()
+    excl_excess = iv - iv_algorithms.fit(df, pre_mask,
+                                         ("global_poly", frozenset()))
+    assert np.abs(excl_excess[post_ord]).min() > 0.10     # all post looks rich
+
+
+def test_earnings_segmented_thin_regime_falls_back():
+    """A pre-earnings regime too thin for its own surface borrows the global
+    fit instead of collapsing — labelled 'fallback', not left at iv."""
+    spot = 100.0
+    strikes = [80, 85, 90, 95, 100, 105, 110, 115, 120]
+    # One pre-earnings expiration (3 rows after masking → too thin) + three
+    # post-earnings expirations that pin a global surface.
+    pre = _chain(spot, [(15, "P")], [95, 100, 105], lambda K, t: 0.30,
+                 earnings_count=0)
+    post = _chain(spot, [(30, "Q1"), (40, "Q2"), (50, "Q3")], strikes,
+                  lambda K, t: 0.45, earnings_count=1)
+    df = pd.concat([pre, post], ignore_index=True)
+    fitted, methods = iv_algorithms.fit(
+        df, _all(df), ("earnings_segmented", frozenset()), return_methods=True)
+    methods = np.asarray(methods)
+    pre_m = (df["earnings_count"] == 0).to_numpy()
+    assert set(methods[pre_m]) == {"fallback"}            # borrowed, not own
+    assert not np.allclose(fitted[pre_m], df.loc[pre_m, "iv"].to_numpy())

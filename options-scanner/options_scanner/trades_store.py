@@ -9,12 +9,17 @@ Each record:
   id          unique short id
   ticker, strike, expiration (YYYY-MM-DD), quantity
   credit      credit per share received at open
-  status      "open" | "closed" | "expired" | "assigned"
+  status      "open" | "closing" | "closed" | "expired" | "assigned"
+              ("closing" = a live buy-to-close order is working but unfilled)
   paper       bool — placed in Schwab paper/sandbox
   order_id    Schwab order id (None until placement is wired)
   opened_at   ISO-8601 timestamp
+  close_order_id  Schwab id of the buy-to-close order (set while "closing")
+  close_limit_px  per-share limit on that closing order
   close_cost  per-share cost paid to close (None while open)
   closed_at   ISO-8601 (None while open)
+  fill_spot   underlying spot captured when the order was first seen filled
+  fill_delta  option delta captured at that same moment
 """
 
 from __future__ import annotations
