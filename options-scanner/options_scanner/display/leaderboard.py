@@ -97,11 +97,14 @@ def _market_open(app_key: str, app_secret: str, callback_url: str,
 
 
 def _submit_put_order(scfg: dict, order, cap: dict | None,
-                      paper: bool) -> dict:
+                      paper: bool, fill: dict | None = None) -> dict:
     """Place (or paper-record) a confirmed put order. Returns {ok, msg}.
 
     LIVE submission happens only when `paper` is False — the existing
     config-level opt-in. Either way the trade is logged to the Trades store.
+    `fill` carries the dialog's fill-time {fill_spot, fill_delta, fill_iv} for
+    paper trades (a paper trade fills immediately at placement, so it's
+    captured here; the live path reconstructs it from the broker fill later).
     """
     from options_scanner import trade_actions, trades_store
     # Store credit PER SHARE (the limit) — that's what the store schema and
@@ -110,7 +113,10 @@ def _submit_put_order(scfg: dict, order, cap: dict | None,
             "expiration": order.expiration, "quantity": order.quantity,
             "credit": order.limit, "status": "open"}
     if paper:
-        trades_store.add({**base, "paper": True})
+        rec = {**base, "paper": True}
+        if fill:
+            rec.update({k: v for k, v in fill.items() if v is not None})
+        trades_store.add(rec)
         return {"ok": True,
                 "msg": (f"📝 Paper trade recorded — {order.describe()}. "
                         "No live order sent. Set `paper = false` in "
@@ -318,7 +324,8 @@ def _investigate_put_body(c: dict, ticker_df: "pd.DataFrame | None" = None,
         with lim_col:
             limit = st.number_input(
                 "Limit price",
-                min_value=0.01, value=float(default_limit),
+                min_value=float(trade_actions.tick_for(default_limit)),
+                value=float(default_limit),
                 step=float(trade_actions.tick_for(default_limit)), format="%.2f",
                 key=f"investigate_limit_{c['ticker']}_{c['strike']:g}_{c['expiration']}",
             )
@@ -357,6 +364,8 @@ def _investigate_put_body(c: dict, ticker_df: "pd.DataFrame | None" = None,
     _confirm_key = f"place_confirm_{_ck}"
     _result_key = f"place_result_{_ck}"
     paper = bool(scfg.get("paper", True))
+    # Mode badge on the action buttons so PAPER vs LIVE is unmissable.
+    _badge = "📝 PAPER" if paper else "🔴 LIVE"
     _result = st.session_state.get(_result_key)
 
     # Footer row: disclaimers (left) beside the Place Trade button (right).
@@ -373,19 +382,19 @@ def _investigate_put_body(c: dict, ticker_df: "pd.DataFrame | None" = None,
     with foot_r:
         # Paper records a simulation any time; a LIVE order is market-gated.
         if not order_ok:
-            st.button("Confirm Trade", disabled=True, key=f"place_{_ck}",
+            st.button(f"Confirm Trade · {_badge}", disabled=True, key=f"place_{_ck}",
                       help="Fix the order above first.")
         elif paper or market_open is True:
-            if st.button("Confirm Trade", key=f"place_{_ck}", type="primary"):
+            if st.button(f"Confirm Trade · {_badge}", key=f"place_{_ck}", type="primary"):
                 st.session_state[_confirm_key] = True
                 st.session_state.pop(_result_key, None)
         elif market_open is False:
-            st.button("Confirm Trade", disabled=True, key=f"place_{_ck}",
+            st.button(f"Confirm Trade · {_badge}", disabled=True, key=f"place_{_ck}",
                       help="Live order — equity options trade 9:30–16:00 ET, "
                            "Mon–Fri.")
             st.caption("⏸ Market closed")
         else:  # None — live, but couldn't confirm the session: stay disabled
-            st.button("Confirm Trade", disabled=True, key=f"place_{_ck}",
+            st.button(f"Confirm Trade · {_badge}", disabled=True, key=f"place_{_ck}",
                       help="Live order — can't confirm market hours (Schwab "
                            "unreachable).")
             st.caption("⏸ Market hours unknown")
@@ -441,14 +450,17 @@ def _investigate_put_body(c: dict, ticker_df: "pd.DataFrame | None" = None,
 
         _cc1, _cc2, _ = st.columns([1, 1, 3])
         with _cc1:
-            _submit = st.button("Place Trade", key=f"confirm_{_ck}",
+            _submit = st.button(f"Place Trade · {_badge}", key=f"confirm_{_ck}",
                                 type="primary", width="stretch")
         with _cc2:
             _cancel_box = st.container(key="investigate_cancel_box")
             _cancel_box.button("Cancel", key=f"cancel_{_ck}", width="stretch",
                                on_click=_cancel_confirm)
         if _submit:
-            _result = _submit_put_order(scfg, order, cap, paper)
+            _result = _submit_put_order(
+                scfg, order, cap, paper,
+                fill={"fill_spot": c.get("spot"), "fill_delta": c.get("delta"),
+                      "fill_iv": c.get("iv")})
             st.session_state[_result_key] = _result
             st.session_state[_confirm_key] = False
             if _result.get("ok"):
@@ -501,6 +513,7 @@ def _investigate_put_body(c: dict, ticker_df: "pd.DataFrame | None" = None,
                 buy=False, ticker=c["ticker"],
                 key_prefix=f"inv_{c['ticker']}_{c['strike']:g}_{c['expiration']}",
                 min_vol=int(min_vol), provider=provider,
+                focus_contract=(float(c["strike"]), str(c["expiration"])),
             )
         except Exception:
             st.caption("IV chart unavailable for this contract.")
